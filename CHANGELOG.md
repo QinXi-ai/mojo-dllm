@@ -32,6 +32,12 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Changed
 
+- GPU activation quantization runs one warp per 32-value block instead of
+  one thread, with the same output bit for bit. LLaDA-8B at 148 tokens:
+  quantization 30.5 to 5.9 ms per forward, measured forward 397-401 to
+  375-385 ms in interleaved traces (`bench/profiles/2026-10-12-quant-*`).
+  `bench/profiles/2026-10-12-llama-cuda.json` traces llama.cpp's CUDA build
+  on the same canvas for comparison.
 - The GPU GEMM picks its token tile per call (32, 64 or 80 wide), so a
   148-token canvas unpacks each weight tile twice instead of five times, and
   the activation scales are laid out for 128-bit shared-memory loads. LLaDA-8B

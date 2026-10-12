@@ -89,7 +89,10 @@ forward pass of each kernel group to `bench/profiles/`. It does not
 synchronize the stream, unlike `MOJO_DLLM_GPU_PROFILE=1`. `--root` points it at
 another checkout's build for before/after comparisons, and it reports a
 median-based total next to the plain sum, because a laptop GPU's clocks move
-under sustained load. `bench/bench_gpu_gemm.mojo` times each LLaDA weight
+under sustained load. `--runtime llama.cpp --seq-len N` traces llama.cpp's
+CUDA `llama-diffusion-cli` on the same prompt instead (it replays its forward
+pass as a CUDA graph, so the trace expands graph nodes), with the same kernel
+groups. `bench/bench_gpu_gemm.mojo` times each LLaDA weight
 shape alone, adding up the per-forward total from the tensor types in the
 GGUF.
 
