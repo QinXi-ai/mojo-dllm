@@ -2,7 +2,7 @@
 
     mojo-dllm run      --model M --prompt TEXT [--max-tokens N] [--steps N] [--block-length N]
                        [--seed N] [--temperature T] [--threads N] [--device cpu|gpu]
-                       [--remasking low_confidence|random]
+                       [--remasking low_confidence|random] [--threshold P]
                        [--no-chat] [--full-logits] [--no-early-stop] [--visual] [--verbose]
                        [--dump-step-stats] [--json]
     mojo-dllm tokenize --model M --prompt TEXT [--no-chat]
@@ -39,7 +39,8 @@ def usage() -> String:
         " 128] [--block-length 32]\n"
         + "                [--seed 42] [--temperature 0] [--threads N]"
         " [--device cpu|gpu]\n"
-        + "                [--remasking low_confidence|random]\n"
+        + "                [--remasking low_confidence|random] [--threshold"
+        " P]\n"
         + "                [--no-chat] [--full-logits] [--no-early-stop]"
         " [--visual] [--verbose] [--dump-step-stats] [--json]\n"
         + "  mojo-dllm tokenize --model M --prompt TEXT [--no-chat]\n"
@@ -194,6 +195,7 @@ def cmd_run(a: Args) raises:
     cfg.seed = a.int_or("seed", 42)
     cfg.temperature = a.float_or("temperature", 0.0)
     cfg.remasking = a.get_or("remasking", "low_confidence")
+    cfg.threshold = a.float_or("threshold", 0.0)
     cfg.full_logits = a.has("full-logits")
     cfg.threads = threads
     var t0 = perf_counter_ns()
