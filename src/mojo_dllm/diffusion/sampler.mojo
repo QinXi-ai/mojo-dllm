@@ -54,6 +54,10 @@ struct GenConfig(Copyable, Movable):
     """Stop once the visible answer is fixed (see `answer_is_fixed`)."""
     var stop_ids: List[Int]
     """End-of-text tokens: the CLI prints the canvas up to the first of them."""
+    var threshold: Float64
+    """LLaDA: also commit every candidate whose confidence reaches this value
+    (Fast-dLLM's parallel decoding). 0 turns it off. A step never commits
+    fewer tokens than the schedule, so a block never takes more steps."""
 
     def __init__(out self):
         self.gen_length = 128
@@ -68,6 +72,7 @@ struct GenConfig(Copyable, Movable):
         self.threads = 1
         self.early_stop = True
         self.stop_ids = List[Int]()
+        self.threshold = 0.0
 
 
 struct GenResult(Movable):
@@ -316,6 +321,13 @@ def _generate_llada[
             + " is not a multiple of the number of blocks "
             + String(num_blocks)
         )
+    if cfg.threshold < 0:
+        raise Error("the confidence threshold must not be negative")
+    if cfg.threshold > 0 and cfg.remasking == "random":
+        raise Error(
+            "a confidence threshold needs low_confidence remasking; random"
+            " remasking has no confidence"
+        )
     if cfg.remasking != "low_confidence" and cfg.remasking != "random":
         raise Error("unknown remasking strategy: " + cfg.remasking)
     var steps_per_block = cfg.steps // num_blocks
@@ -382,7 +394,14 @@ def _generate_llada[
                 else:
                     conf = greedy[1].copy()
             var committed = List[Int]()
-            for j in select_top(conf, schedule[s]):
+            var k = schedule[s]
+            if cfg.threshold > 0:
+                var sure = 0
+                for c in conf:
+                    if c >= cfg.threshold:
+                        sure += 1
+                k = min(max(k, sure), len(cand))
+            for j in select_top(conf, k):
                 res.tokens[cand[j]] = x0[j]
                 committed.append(cand[j])
             res.step_ms.append(Float64(perf_counter_ns() - t_step) / 1e6)
@@ -478,6 +497,8 @@ def _generate_dream[
             "Dream sampling with temperature > 0 is not implemented yet; use"
             " --temperature 0"
         )
+    if cfg.threshold > 0:
+        raise Error("the confidence threshold is implemented for LLaDA only")
     var P = len(prompt)
     if P == 0:
         raise Error(
