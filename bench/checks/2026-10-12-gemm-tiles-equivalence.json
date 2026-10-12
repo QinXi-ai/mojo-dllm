@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-12",
+  "claim": "The tile and scale-layout changes (78014b4) change GEMM outputs only by float rounding.",
+  "method": "scratch-free reproduction: gemm_gpu on fixed synthetic Q4_K and Q6_K weights (512 x 4096) and 148 tokens of activations, before (5835aff) and after (78014b4); then LLaDA-8B logits for an 84-token canvas.",
+  "synthetic_gemm": {
+    "q4k": {
+      "outputs": 75776,
+      "identical": false,
+      "median_relative_difference": 1.0801022165901094e-07,
+      "max_relative_difference": 6.994748698773258e-05
+    },
+    "q6k": {
+      "outputs": 75776,
+      "identical": true,
+      "median_relative_difference": 0.0,
+      "max_relative_difference": 0.0
+    }
+  },
+  "tile_widths_identical_to_each_other": {
+    "32": true,
+    "48": true,
+    "64": true,
+    "80": true
+  },
+  "llada_logits_84_tokens": {
+    "rows": 84,
+    "prompt_rows": 20,
+    "median_cosine": 0.9999824570081829,
+    "min_cosine": 0.9987481875422727,
+    "worst_row": 13,
+    "masked_rows_min_cosine": 0.9999478221948521,
+    "argmax_agree": 82,
+    "note": "The worst rows are prompt rows, which amplify rounding through 32 layers; masked rows, the ones a step samples, stay above 0.99994."
+  }
+}

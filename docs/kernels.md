@@ -77,14 +77,27 @@ one activation scale:
 sum w x = d*sc*dx * sum(q * qx)  -  dmin*m * (dx * sum(qx))
 ```
 
-**One mma per sub-block.** A thread block computes 64 weight rows by 32
-tokens. For each 256-wide super-block it unpacks the weights into shared
-memory as int8 (Q4_K as 0..15, Q6_K as q - 32), copies the matching
-activations next to them, and each of its 4 warps runs
-`mma.m16n8k32.s8` per sub-block for its 16 rows. Q6_K scales every 16
-weights, so it uses `mma.m16n8k16` instead, one per scale. The int32 result
-goes to f32 with the two scales and, for Q4_K, the min term. Shared rows are
-272 bytes apart so the 8 rows a fragment load reads fall in different banks.
+**One mma per sub-block.** A thread block computes 64 weight rows by a tile
+of 32, 64 or 80 tokens. For each 256-wide super-block it unpacks the weights
+into shared memory as int8 (Q4_K as 0..15, Q6_K as q - 32), copies the
+matching activations next to them, and each of its 4 warps runs
+`mma.m16n8k32.s8` per sub-block for its 16 rows and every 8 tokens. Q6_K
+scales every 16 weights, so it uses `mma.m16n8k16` instead, one per scale.
+The int32 result goes to f32 with the two scales and, for Q4_K, the min term.
+
+**Tile width per call.** Unpacking a weight tile costs the same however
+many tokens then use it, so the widest tile that saves a tile wins: a
+148-token canvas runs two 80-wide tiles rather than five 32-wide ones, and
+each weight tile is unpacked twice instead of five times. The LM head's 32
+rows keep the 32-wide tile. 80 is the widest tile whose shared memory fits
+the 48 KiB a kernel gets without asking for more. Token tiles of one weight
+tile run back to back, so they read it through L2.
+
+**Shared-memory layout.** Weight rows are 272 bytes apart, so the 8 rows a
+fragment load reads fall in different banks. Activation scales are stored
+by sub-block, then token, then (scale, sum), so the pair of tokens a thread
+folds after an mma is one 128-bit load, and the scale rows are padded to 9
+and 17 floats for the same reason.
 `tests/gpu/test_gpu.mojo` checks the fragment layout against a CPU matmul
 on random int8 matrices, and the whole kernel against an f64 GEMM.
 
