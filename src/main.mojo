@@ -2,7 +2,7 @@
 
     mojo-dllm run      --model M --prompt TEXT [--max-tokens N] [--steps N] [--block-length N]
                        [--seed N] [--temperature T] [--threads N] [--device cpu|gpu]
-                       [--remasking low_confidence|random] [--threshold P]
+                       [--remasking low_confidence|random] [--threshold P] [--dual-cache]
                        [--no-chat] [--full-logits] [--no-early-stop] [--visual] [--verbose]
                        [--dump-step-stats] [--json]
     mojo-dllm tokenize --model M --prompt TEXT [--no-chat]
@@ -40,7 +40,7 @@ def usage() -> String:
         + "                [--seed 42] [--temperature 0] [--threads N]"
         " [--device cpu|gpu]\n"
         + "                [--remasking low_confidence|random] [--threshold"
-        " P]\n"
+        " P] [--dual-cache]\n"
         + "                [--no-chat] [--full-logits] [--no-early-stop]"
         " [--visual] [--verbose] [--dump-step-stats] [--json]\n"
         + "  mojo-dllm tokenize --model M --prompt TEXT [--no-chat]\n"
@@ -197,6 +197,7 @@ def cmd_run(a: Args) raises:
     cfg.remasking = a.get_or("remasking", "low_confidence")
     cfg.threshold = a.float_or("threshold", 0.0)
     cfg.full_logits = a.has("full-logits")
+    cfg.dual_cache = a.has("dual-cache")
     cfg.threads = threads
     var t0 = perf_counter_ns()
     var g = GGUFFile(a.get("model"))
@@ -207,7 +208,9 @@ def cmd_run(a: Args) raises:
     var device = a.get_or("device", "cpu")
     var max_tokens = len(prompt) + cfg.gen_length
     if device == "gpu":
-        var gm = GpuDiffusionLM(a.get("model"), max_tokens=max_tokens)
+        var gm = GpuDiffusionLM(
+            a.get("model"), max_tokens=max_tokens, kv_cache=cfg.dual_cache
+        )
         _run(
             gm,
             a,
@@ -221,7 +224,10 @@ def cmd_run(a: Args) raises:
         )
     elif device == "cpu":
         var cm = DiffusionLM(
-            a.get("model"), threads=threads, max_tokens=max_tokens
+            a.get("model"),
+            threads=threads,
+            max_tokens=max_tokens,
+            kv_cache=cfg.dual_cache,
         )
         _run(
             cm,
@@ -480,6 +486,7 @@ def main():
                 "json",
                 "visual",
                 "no-early-stop",
+                "dual-cache",
             ],
         )
         if a.command == "run":

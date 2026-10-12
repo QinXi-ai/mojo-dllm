@@ -54,6 +54,10 @@ struct GenConfig(Copyable, Movable):
     """Stop once the visible answer is fixed (see `answer_is_fixed`)."""
     var stop_ids: List[Int]
     """End-of-text tokens: the CLI prints the canvas up to the first of them."""
+    var dual_cache: Bool
+    """LLaDA: refresh the model's K/V cache at each block's first step and
+    recompute only the block's rows on the others (Fast-dLLM's DualCache).
+    The model must be built with its K/V cache on. Approximate."""
     var threshold: Float64
     """LLaDA: also commit every candidate whose confidence reaches this value
     (Fast-dLLM's parallel decoding). 0 turns it off. A step never commits
@@ -73,6 +77,7 @@ struct GenConfig(Copyable, Movable):
         self.early_stop = True
         self.stop_ids = List[Int]()
         self.threshold = 0.0
+        self.dual_cache = False
 
 
 struct GenResult(Movable):
@@ -321,6 +326,11 @@ def _generate_llada[
             + " is not a multiple of the number of blocks "
             + String(num_blocks)
         )
+    if cfg.dual_cache and cfg.full_logits:
+        raise Error(
+            "the K/V cache recomputes one block, so it cannot give every row's"
+            " logits"
+        )
     if cfg.threshold < 0:
         raise Error("the confidence threshold must not be negative")
     if cfg.threshold > 0 and cfg.remasking == "random":
@@ -365,7 +375,15 @@ def _generate_llada[
                     rows.append(i)
             else:
                 rows = cand.copy()
-            model.forward(res.tokens, rows, logits.ptr())
+            if cfg.dual_cache:
+                # The block's first step refreshes every row's K/V; the rest
+                # recompute the block's rows against that cache.
+                if s == 0:
+                    model.forward_window(res.tokens, 0, L, rows, logits.ptr())
+                else:
+                    model.forward_window(res.tokens, b0, b1, rows, logits.ptr())
+            else:
+                model.forward(res.tokens, rows, logits.ptr())
             res.forward_passes += 1
             var x0 = List[Int](capacity=len(cand))
             var conf = List[Float64](capacity=len(cand))
@@ -499,6 +517,8 @@ def _generate_dream[
         )
     if cfg.threshold > 0:
         raise Error("the confidence threshold is implemented for LLaDA only")
+    if cfg.dual_cache:
+        raise Error("the block K/V cache is implemented for LLaDA only")
     var P = len(prompt)
     if P == 0:
         raise Error(
