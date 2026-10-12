@@ -28,6 +28,7 @@ from mojo_dllm.gpu.kernels import (
     dev_i8,
     dev_i32,
     mma_tile_gpu,
+    _pick_bn,
 )
 from mojo_dllm.gpu.model import GpuDiffusionLM
 from mojo_dllm.kernels.ops import (
@@ -284,6 +285,26 @@ def test_gemm_q6k_ragged_tokens() raises:
 
 def test_gemm_q6k_two_superblocks() raises:
     _check_gemm("blk.1.ffn_down.weight", 19)
+
+
+def test_gemm_q4k_widest_tile() raises:
+    # 150 tokens take two 80-wide tiles (three at 64), so this runs the
+    # widest kernel, the one real canvases use.
+    assert_equal(_pick_bn(150), 80)
+    _check_gemm("blk.0.ffn_gate.weight", 150)
+
+
+def test_gemm_q6k_widest_tile() raises:
+    assert_equal(_pick_bn(150), 80)
+    _check_gemm("blk.1.ffn_down.weight", 150)
+
+
+def test_tile_width_rule() raises:
+    assert_equal(_pick_bn(1), 32)
+    assert_equal(_pick_bn(32), 32)
+    assert_equal(_pick_bn(37), 64)
+    assert_equal(_pick_bn(148), 80)
+    assert_equal(_pick_bn(380), 80)
 
 
 def _check_forward(path: String, vocab: Int) raises:
