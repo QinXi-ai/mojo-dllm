@@ -99,5 +99,5 @@
       "count": 8
     }
   },
-  "note": "Traced with nsys --trace=cuda (no stream synchronization). Times are device time per forward pass."
+  "note": "Traced with nsys --trace=cuda (no stream synchronization). Times are device time per forward pass. Recorded before the profiler grouped Mojo's six-character kernel names; median_ms_per_forward per group was recomputed afterwards from this run's own trace with nsys stats gpukernsum. kernel_ms_per_forward is the original plain sum."
 }
