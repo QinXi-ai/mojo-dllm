@@ -34,8 +34,8 @@ semantic versioning (0.y: minor bumps may break things).
 
 - The GPU GEMM picks its token tile per call (32, 64 or 80 wide), so a
   148-token canvas unpacks each weight tile twice instead of five times, and
-  its scale loads no longer hit shared-memory bank conflicts. LLaDA-8B GEMM
-  time per forward: 395 to 286 ms in interleaved traces
+  the activation scales are laid out for 128-bit shared-memory loads. LLaDA-8B
+  GEMM time per forward: 395 to 286 ms in interleaved traces
   (`bench/profiles/2026-10-12-gemmtile-*`); outputs change only by rounding
   (`bench/checks/2026-10-12-gemm-tiles-equivalence.json`).
 - The GPU GEMM runs a weight tile's token tiles back to back, so they share
