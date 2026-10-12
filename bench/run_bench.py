@@ -119,6 +119,8 @@ def run_mojo(c: dict, prompt: str, threads: int, extra: list[str]) -> dict:
         str(ROOT / "build/mojo-dllm"), "run", "--model", c["models"]["gguf"], "--prompt", prompt,
         "--max-tokens", str(c["gen_length"]), "--steps", str(c["steps"]),
         "--block-length", str(c["block_length"]), "--threads", str(threads), "--json",
+        # Every runtime does every step, so ms / step and generation time compare.
+        "--no-early-stop",
     ] + extra
     rc, out, err, wall, rss = timed(cmd)
     line = next((l for l in out.splitlines() if l.startswith("{")), None)

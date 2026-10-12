@@ -46,7 +46,8 @@ def main() -> int:
         for steps in [int(s) for s in args.steps.split(",")]:
             out = subprocess.run(
                 [str(ROOT / "build/mojo-dllm"), "run", "--model", model, "--prompt", prompt,
-                 "--max-tokens", str(args.gen), "--steps", str(steps), "--threads", args.threads, "--json"],
+                 "--max-tokens", str(args.gen), "--steps", str(steps), "--threads", args.threads, "--json",
+                 "--no-early-stop"],
                 capture_output=True, text=True,
             )
             line = next((l for l in out.stdout.splitlines() if l.startswith("{")), None)

@@ -3,7 +3,8 @@
     mojo-dllm run      --model M --prompt TEXT [--max-tokens N] [--steps N] [--block-length N]
                        [--seed N] [--temperature T] [--threads N] [--device cpu|gpu]
                        [--remasking low_confidence|random]
-                       [--no-chat] [--full-logits] [--visual] [--verbose] [--dump-step-stats] [--json]
+                       [--no-chat] [--full-logits] [--no-early-stop] [--visual] [--verbose]
+                       [--dump-step-stats] [--json]
     mojo-dllm tokenize --model M --prompt TEXT [--no-chat]
     mojo-dllm inspect  MODEL.gguf
     mojo-dllm logits   --model M --tokens 1,2,3 --rows 0,2 --out logits.f32 [--threads N] [--device cpu|gpu]
@@ -39,8 +40,8 @@ def usage() -> String:
         + "                [--seed 42] [--temperature 0] [--threads N]"
         " [--device cpu|gpu]\n"
         + "                [--remasking low_confidence|random]\n"
-        + "                [--no-chat] [--full-logits] [--visual] [--verbose]"
-        " [--dump-step-stats] [--json]\n"
+        + "                [--no-chat] [--full-logits] [--no-early-stop]"
+        " [--visual] [--verbose] [--dump-step-stats] [--json]\n"
         + "  mojo-dllm tokenize --model M --prompt TEXT [--no-chat]\n"
         + "  mojo-dllm inspect MODEL.gguf\n"
         + "  mojo-dllm logits --model M --tokens IDS --rows POS --out FILE"
@@ -280,6 +281,11 @@ def _run[
                 cfg.remasking,
             )
         print("load time:", model.load_time(), "s (tokenizer", tok_s, "s)")
+    cfg.early_stop = not a.has("no-early-stop")
+    cfg.stop_ids = List[Int]()
+    for s in [tok.eos_id, tok.eot_id]:
+        if s >= 0:
+            cfg.stop_ids.append(s)
     var printer = CanvasPrinter(
         tok^, len(prompt), model.config().mask_id, a.has("visual")
     )
@@ -322,6 +328,8 @@ def _run[
             + String(cfg.block_length)
             + ', "full_logits": '
             + ("true" if cfg.full_logits else "false")
+            + ', "stopped_early": '
+            + ("true" if res.stopped_early else "false")
             + ', "forward_passes": '
             + String(res.forward_passes)
             + ', "load_s": '
@@ -469,6 +477,7 @@ def main():
                 "dump-step-stats",
                 "json",
                 "visual",
+                "no-early-stop",
             ],
         )
         if a.command == "run":

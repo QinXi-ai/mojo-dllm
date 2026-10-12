@@ -24,6 +24,7 @@ The hooks run `scripts/ci-local.sh --fast` before each commit (hygiene scan,
 | claims | `scripts/bench_table.py --check` | a benchmark table differs from what `bench/results/*.json` renders |
 | docs | `mdbook build` + `scripts/check_links.py` | a relative link is broken |
 | action pins | `scripts/verify-action-pins.sh` (CI) | a pinned SHA is not the tag its comment names |
+| eval self-test | `bench/eval_gsm8k.py --self-test` | answer extraction or the paired statistics break, or `gsm8k-200.jsonl` is not 200 rows with numeric answers |
 | no GPU | `scripts/check_no_gpu.sh` | `--device gpu` without a GPU does anything but exit 1 with a message |
 | GPU tests | `scripts/run-gpu-tests.sh` (local only) | a GPU kernel or the GPU forward pass disagrees with the CPU or the f32 reference, or the count differs from `tests/gpu/test-count.txt` |
 
@@ -77,6 +78,39 @@ CUDA in `build-cuda/`:
 ```bash
 cmake -B build-cuda -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86
 cmake --build build-cuda --target llama-diffusion-cli
+```
+
+### GPU kernels
+
+`scripts/gpu_profile.py` traces one `run --device gpu` with Nsight Systems
+(`nsys --trace=cuda`, which ran here without root although the driver keeps
+hardware counters for admins) and writes the device time per
+forward pass of each kernel group to `bench/profiles/`. It does not
+synchronize the stream, unlike `MOJO_DLLM_GPU_PROFILE=1`. `--root` points it at
+another checkout's build for before/after comparisons, and it reports a
+median-based total next to the plain sum, because a laptop GPU's clocks move
+under sustained load. `bench/bench_gpu_gemm.mojo` times each LLaDA weight
+shape alone, adding up the per-forward total from the tensor types in the
+GGUF.
+
+On the development laptop the GPU is capped at 30 W and its clocks drop under
+sustained load (`bench/checks/2026-10-12-gpu-power-under-load.txt`), so
+compare kernels with interleaved runs (A, B, A, B) in one session rather than
+against a number from another day.
+
+### Quality
+
+`bench/eval_gsm8k.py` answers a fixed 200-problem GSM8K subset
+(`bench/eval/gsm8k-200.jsonl`, see `bench/eval/SOURCE.md`) and compares two
+arms problem by problem: accuracy difference with a 95% interval and
+McNemar's exact test. Any change that is not exact (a sampler that commits
+more per step, a K/V cache) needs a comparison against the one-token-per-step
+baseline before it becomes a default.
+
+```bash
+python3 bench/eval_gsm8k.py run --model M.gguf --arm baseline
+python3 bench/eval_gsm8k.py run --model M.gguf --arm candidate -- --some-flag
+python3 bench/eval_gsm8k.py compare baseline candidate
 ```
 
 ## Toolchain

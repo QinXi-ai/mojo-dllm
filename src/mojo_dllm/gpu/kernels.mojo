@@ -628,8 +628,8 @@ def _q4k_mma_kernel(
     var k = Int(K)
     var n_rows = Int(N)
     var n_tok = Int(T)
-    var r0 = Int(block_idx.x) * BM
-    var t0 = Int(block_idx.y) * BN
+    var r0 = Int(block_idx.y) * BM
+    var t0 = Int(block_idx.x) * BN
     var th = Int(thread_idx.x)
     var lane = Int(lane_id())
     var warp = Int(warp_id())
@@ -770,8 +770,8 @@ def _q6k_mma_kernel(
     var k = Int(K)
     var n_rows = Int(N)
     var n_tok = Int(T)
-    var r0 = Int(block_idx.x) * BM
-    var t0 = Int(block_idx.y) * BN
+    var r0 = Int(block_idx.y) * BM
+    var t0 = Int(block_idx.x) * BN
     var th = Int(thread_idx.x)
     var lane = Int(lane_id())
     var warp = Int(warp_id())
@@ -922,7 +922,10 @@ def gemm_gpu(
     """
     if K != qa.K or n_tokens > qa.max_tokens:
         raise Error("activation buffer is the wrong shape")
-    var grid = (_cdiv(N, BM), _cdiv(n_tokens, BN))
+    # Token tiles vary fastest, so the few blocks that read one weight tile
+    # run back to back and share it through L2. With the row tile fastest,
+    # every token tile streamed the whole matrix from DRAM again.
+    var grid = (_cdiv(n_tokens, BN), _cdiv(N, BM))
     if ggml_type == GGML_Q4_K:
         ctx.enqueue_function[_q4k_mma_kernel](
             w,

@@ -120,7 +120,8 @@ def main() -> int:
         toks = tokenize(args.model, case.prompt)
         out = run([str(ROOT / "build/mojo-dllm"), "run", "--model", args.model, "--prompt", case.prompt,
                    "--max-tokens", str(case.gen), "--block-length", str(case.block),
-                   "--steps", str(case.steps), "--threads", args.threads, "--device", args.device, "--json"])
+                   "--steps", str(case.steps), "--threads", args.threads, "--device", args.device, "--json",
+                   "--no-early-stop"])
         j = json.loads(next(l for l in out.splitlines() if l.startswith("{")))
         mine = j["tokens"][len(toks):]
         if args.arch == "dream":
