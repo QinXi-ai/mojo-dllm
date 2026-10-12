@@ -14,7 +14,13 @@ semantic versioning (0.y: minor bumps may break things).
   against its CPU twin, and the parity harness takes `--device gpu`.
 - `MOJO_DLLM_GPU_PROFILE=1` splits `--verbose` timings on the GPU.
 - `bench/config-gpu.json` and `bench/config-dream-gpu.json`, against
-  llama.cpp built with CUDA.
+  llama.cpp built with CUDA, and their results: llama.cpp's CUDA build is
+  faster than `--device gpu` on the RTX 3050 tested. Results record runs that
+  started on a busy CPU, and the tables give the quiet-run medians next to
+  them.
+- Fairness runs for the CPU comparison: llama.cpp is fastest at 12 threads,
+  the most the test CPU runs, and mojo-dllm's forward pass alone stays ahead
+  of `llama-bench`.
 
 ### Changed
 
