@@ -983,10 +983,10 @@ def _pick_bn(n_tokens: Int) -> Int:
 
     A wider tile unpacks each weight tile once for more tokens, so it wins
     whenever it saves a tile (148 tokens: 80 wide, 2 tiles, against 5 at 32;
-    bench_gpu_gemm measured 350 against 445 ms of GEMM per LLaDA forward).
+    bench/profiles/2026-10-12-gemmtile-* has the GEMM time before and after).
     A tile wider than the canvas only wastes work, so the 32 rows of the LM
     head keep 32. 80 is the widest whose shared memory fits the 48 KiB
-    static limit; 48 measured slower than 32, so it is not offered.
+    static limit.
     """
     var best = 32
     for bn in [32, 64, 80]:
