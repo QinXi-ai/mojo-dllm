@@ -33,8 +33,9 @@ semantic versioning (0.y: minor bumps may break things).
 ### Changed
 
 - The GPU GEMM runs a weight tile's token tiles back to back, so they share
-  it through L2. Results are bit-identical; `bench/profiles/2026-10-12-gemm-*`
-  hold four interleaved before/after traces.
+  it through L2. Logits are byte-identical
+  (`bench/checks/2026-10-12-grid-order-logits.json`), and
+  `bench/profiles/2026-10-12-gemm-*` hold four interleaved before/after traces.
 
 - The samplers' per-row confidence pass runs on `--threads` workers. Each
   row's arithmetic is unchanged, so tokens do not depend on the thread count.

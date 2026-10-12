@@ -128,10 +128,12 @@ def main() -> int:
             s["ms_per_forward"] += ns / 1e6 / forwards
             s["median_ms_per_forward"] += med / 1e6 / forwards
             s["launches_per_forward"] += n / forwards
+    # Copy totals cover the whole run, including the one-time weight upload,
+    # so they are reported per run, not per forward pass.
     copies = {}
     for r in rows(mem):
         copies[r["Operation"].strip('"[]')] = dict(
-            ms_per_forward=float(r["Total Time (ns)"]) / 1e6 / forwards, count=int(r["Count"]))
+            ms_total=float(r["Total Time (ns)"]) / 1e6, count=int(r["Count"]))
     kernel_ms = sum(e["ms_per_forward"] for e in groups.values())
     version = run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"]).stdout.strip()
     dirty = bool(run(["git", "-C", str(root), "status", "--porcelain", "--", "src"]).stdout.strip())
@@ -147,14 +149,15 @@ def main() -> int:
         groups={k: {kk: round(vv, 3) for kk, vv in v.items()} for k, v in sorted(groups.items(), key=lambda kv: -kv[1]["ms_per_forward"])},
         gemm_by_grid={k: {kk: round(vv, 3) for kk, vv in v.items()} for k, v in sorted(gemm_shapes.items(), key=lambda kv: -kv[1]["ms_per_forward"])},
         copies=copies,
-        note="Traced with nsys --trace=cuda (no stream synchronization). Times are device time per forward pass.",
+        note="Traced with nsys --trace=cuda (no stream synchronization). Kernel times are device time per "
+             "forward pass; copies are totals for the run, weight upload included.",
     )
     out = pathlib.Path(args.out) if args.out else ROOT / "bench" / "profiles" / f"{dt.date.today().isoformat()}-{args.label}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, indent=2) + "\n")
     print(json.dumps(dict(kernel_ms_per_forward=doc["kernel_ms_per_forward"], forward_ms=j["forward_ms"],
                           groups={k: v["ms_per_forward"] for k, v in doc["groups"].items()}), indent=1))
-    print(f"wrote {out.relative_to(ROOT)}")
+    print(f"wrote {out}")
     return 0
 
 

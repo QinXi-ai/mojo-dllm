@@ -1,0 +1,14 @@
+# nvidia-smi during bench/bench_gpu_gemm (148 tokens, 200 reps), sampled every 2 s, 2026-10-12T10:25:26-06:00
+# RmProfilingAdminOnly: 1
+        Current Power Limit                            : 30.00 W
+        Requested Power Limit                          : 60.00 W
+        Default Power Limit                            : 60.00 W
+        Current Power Limit                            : N/A
+        Requested Power Limit                          : N/A
+        Default Power Limit                            : N/A
+# clocks.sm, clocks.mem, power.draw, temperature, pstate, throttle_reasons, utilization
+1492 MHz, 5486 MHz, 312.23 W, 59, P3, 0x0000000000000024, 9 %
+1357 MHz, 5486 MHz, 29.85 W, 63, P3, 0x0000000000000024, 100 %
+1177 MHz, 5486 MHz, 29.42 W, 63, P3, 0x0000000000000024, 100 %
+1057 MHz, 5486 MHz, 29.18 W, 63, P3, 0x0000000000000024, 100 %
+# bench_gpu_gemm output: {"tokens": 148, "reps": 200, "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU", "median_ms": {"q4k_4096x4096": 1.107785, "q6k_4096x4096": 1.122873, "q4k_12288x4096": 3.36199, "q6k_4096x12288": 3.349338, "q6k_126464x4096_32rows": 7.949226}, "gemm_ms_per_forward": 472.57469799999996}

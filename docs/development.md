@@ -24,7 +24,7 @@ The hooks run `scripts/ci-local.sh --fast` before each commit (hygiene scan,
 | claims | `scripts/bench_table.py --check` | a benchmark table differs from what `bench/results/*.json` renders |
 | docs | `mdbook build` + `scripts/check_links.py` | a relative link is broken |
 | action pins | `scripts/verify-action-pins.sh` (CI) | a pinned SHA is not the tag its comment names |
-| eval self-test | `bench/eval_gsm8k.py --self-test` | answer extraction, the paired statistics or the GSM8K subset is broken |
+| eval self-test | `bench/eval_gsm8k.py --self-test` | answer extraction or the paired statistics break, or `gsm8k-200.jsonl` is not 200 rows with numeric answers |
 | no GPU | `scripts/check_no_gpu.sh` | `--device gpu` without a GPU does anything but exit 1 with a message |
 | GPU tests | `scripts/run-gpu-tests.sh` (local only) | a GPU kernel or the GPU forward pass disagrees with the CPU or the f32 reference, or the count differs from `tests/gpu/test-count.txt` |
 
@@ -83,17 +83,20 @@ cmake --build build-cuda --target llama-diffusion-cli
 ### GPU kernels
 
 `scripts/gpu_profile.py` traces one `run --device gpu` with Nsight Systems
-(`nsys --trace=cuda`, no admin rights needed) and writes the device time per
+(`nsys --trace=cuda`, which ran here without root although the driver keeps
+hardware counters for admins) and writes the device time per
 forward pass of each kernel group to `bench/profiles/`. It does not
 synchronize the stream, unlike `MOJO_DLLM_GPU_PROFILE=1`. `--root` points it at
 another checkout's build for before/after comparisons, and it reports a
 median-based total next to the plain sum, because a laptop GPU's clocks move
 under sustained load. `bench/bench_gpu_gemm.mojo` times each LLaDA weight
-shape alone.
+shape alone, adding up the per-forward total from the tensor types in the
+GGUF.
 
-On the development laptop the GPU is capped at 30 W and drops its memory
-clock under long runs, so compare kernels with interleaved runs (A, B, A, B)
-in one session rather than against a number from another day.
+On the development laptop the GPU is capped at 30 W and its clocks drop under
+sustained load (`bench/checks/2026-10-12-gpu-power-under-load.txt`), so
+compare kernels with interleaved runs (A, B, A, B) in one session rather than
+against a number from another day.
 
 ### Quality
 

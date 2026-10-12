@@ -1,16 +1,17 @@
-"""GPU GEMM time on LLaDA-8B's weight shapes, one shape at a time.
+"""GPU GEMM time on a model's weight shapes, one shape at a time.
 
-Usage: mojo run -I src bench/bench_gpu_gemm.mojo [tokens] [reps]
+Usage: mojo run -I src bench/bench_gpu_gemm.mojo MODEL.gguf [tokens] [reps]
 
 Each shape first runs for half a second to bring the GPU to its boost clock,
-then `reps` times with the stream synchronized around every call;
-the median is reported, since a laptop GPU's clocks and a stray process can
-slow single calls. Weight bytes are synthetic (time does not depend on their
-values). The per-forward line multiplies each shape by how often a LLaDA-8B
-forward pass runs it: 32 layers of q, k, o (Q4_K 4096 x 4096), v (Q6_K
-4096 x 4096), gate and up (Q4_K 12288 x 4096) and down (Q6_K 4096 x 12288),
-plus the LM head (Q6_K 126464 x 4096) on the 32 rows a step samples.
-Prints one JSON object.
+then `reps` times with the stream synchronized around every call; the median
+is reported, since a laptop GPU's clocks and a stray process can slow single
+calls. Weight bytes are synthetic (time does not depend on their values).
+
+The per-forward total reads every projection's tensor type from the GGUF (a
+Q4_K_M file mixes Q4_K and Q6_K layer by layer), adds the median time of that
+type and shape, and counts the last layer's FFN on the 32 rows a step
+samples, as the forward pass does. The LM head runs on 32 rows. Prints one
+JSON object.
 """
 
 from std.sys import argv
@@ -18,7 +19,12 @@ from std.time import perf_counter_ns
 
 from max.gpu.host import DeviceContext
 
-from mojo_dllm.formats.gguf import GGML_Q4_K, GGML_Q6_K, ggml_type_name
+from mojo_dllm.formats.gguf import (
+    GGUFFile,
+    GGML_Q4_K,
+    GGML_Q6_K,
+    ggml_type_name,
+)
 from mojo_dllm.gpu.kernels import (
     GpuQActs,
     dev_f32,
@@ -64,35 +70,87 @@ def time_shape(
     return times[len(times) // 2]
 
 
+def _basename(path: String) -> String:
+    var parts = path.split("/")
+    return String(parts[len(parts) - 1])
+
+
+def _key(t: Int, n: Int, k: Int, rows: Int) -> String:
+    return (
+        ggml_type_name(t)
+        + " "
+        + String(n)
+        + "x"
+        + String(k)
+        + " @"
+        + String(rows)
+    )
+
+
 def main() raises:
     var args = argv()
-    var T = Int(args[1]) if len(args) > 1 else 148
-    var reps = Int(args[2]) if len(args) > 2 else 30
+    if len(args) < 2:
+        raise Error("usage: bench_gpu_gemm MODEL.gguf [tokens] [reps]")
+    var g = GGUFFile(String(args[1]))
+    var T = Int(args[2]) if len(args) > 2 else 148
+    var reps = Int(args[3]) if len(args) > 3 else 30
     var ctx = DeviceContext()
-    var qk = time_shape(ctx, 4096, 4096, GGML_Q4_K, T, reps)
-    var v = time_shape(ctx, 4096, 4096, GGML_Q6_K, T, reps)
-    var gu = time_shape(ctx, 12288, 4096, GGML_Q4_K, T, reps)
-    var down = time_shape(ctx, 4096, 12288, GGML_Q6_K, T, reps)
-    var head = time_shape(ctx, 126464, 4096, GGML_Q6_K, 32, reps)
-    var per_forward = 32.0 * (3.0 * qk + v + 2.0 * gu + down) + head
+    var n_layers = g.get_int(g.architecture() + ".block_count")
+    var names: List[String] = [
+        "attn_q",
+        "attn_k",
+        "attn_v",
+        "attn_output",
+        "ffn_gate",
+        "ffn_up",
+        "ffn_down",
+    ]
+    # Every (type, N, K, rows) the forward pass runs, timed once each.
+    var keys = List[String]()
+    var times = List[Float64]()
+    var total = Float64(0)
+    var json = String("")
+    for li in range(n_layers):
+        for name in names:
+            var t = g.tensor("blk." + String(li) + "." + name + ".weight")
+            var rows = T
+            if li == n_layers - 1 and name.startswith("ffn"):
+                rows = 32
+            var key = _key(t.ggml_type, t.n_rows(), t.ne0, rows)
+            var found = -1
+            for i in range(len(keys)):
+                if keys[i] == key:
+                    found = i
+            if found < 0:
+                keys.append(key)
+                times.append(
+                    time_shape(ctx, t.n_rows(), t.ne0, t.ggml_type, rows, reps)
+                )
+                found = len(keys) - 1
+            total += times[found]
+    var head = g.tensor("output.weight")
+    var head_ms = time_shape(
+        ctx, head.n_rows(), head.ne0, head.ggml_type, 32, reps
+    )
+    total += head_ms
+    for i in range(len(keys)):
+        json += (", " if i else "") + '"' + keys[i] + '": ' + String(times[i])
     print(
-        '{"tokens": '
+        '{"model": "'
+        + _basename(String(args[1]))
+        + '", "tokens": '
         + String(T)
         + ', "reps": '
         + String(reps)
         + ', "gpu": "'
         + ctx.name()
-        + '", "median_ms": {"q4k_4096x4096": '
-        + String(qk)
-        + ', "q6k_4096x4096": '
-        + String(v)
-        + ', "q4k_12288x4096": '
-        + String(gu)
-        + ', "q6k_4096x12288": '
-        + String(down)
-        + ', "q6k_126464x4096_32rows": '
-        + String(head)
+        + '", "median_ms": {'
+        + json
+        + ', "'
+        + _key(head.ggml_type, head.n_rows(), head.ne0, 32)
+        + '": '
+        + String(head_ms)
         + '}, "gemm_ms_per_forward": '
-        + String(per_forward)
+        + String(total)
         + "}"
     )

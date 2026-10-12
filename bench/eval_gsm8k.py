@@ -17,8 +17,11 @@ the output, and compares it with the gold answer.
 `compare` pairs two arms problem by problem and writes
 bench/eval/DATE-ARM_A-vs-ARM_B.json: both accuracies, the difference with a
 95% confidence interval, McNemar's exact test on the discordant problems, and
-the forward passes and seconds each arm spent. With n = 200 the interval is
-roughly +/- 3 points, so a smaller change is "not detectable", not "zero".
+the forward passes and seconds each arm spent. The interval's width depends
+on how many problems the arms disagree on: with 10 of 200 it is about +/- 3
+points, so a smaller change is "not detectable", not "zero". An arm keeps one
+configuration (flags, code version, model): resuming with another is refused,
+and so is comparing arms that ran different models.
 """
 
 from __future__ import annotations
@@ -84,10 +87,6 @@ def cmd_run(args: argparse.Namespace, extra: list[str]) -> int:
         problems = problems[: args.limit]
     RUNS.mkdir(parents=True, exist_ok=True)
     out = RUNS / f"{args.arm}.jsonl"
-    done = set()
-    if out.exists():
-        for l in out.read_text().splitlines():
-            done.add(json.loads(l)["index"])
     steps = args.steps or args.gen_length
     flags = ["--max-tokens", str(args.gen_length), "--block-length", str(args.block_length),
              "--steps", str(steps), "--device", args.device, "--json"] + extra
@@ -96,6 +95,19 @@ def cmd_run(args: argparse.Namespace, extra: list[str]) -> int:
     dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--", "src"],
                            capture_output=True, text=True).stdout.strip()
     version += "-dirty" if dirty else ""
+    model = pathlib.Path(args.model).name
+    done = set()
+    if out.exists():
+        # A resumed arm must keep one configuration, or a paired comparison
+        # would mix two of them without saying so.
+        for l in out.read_text().splitlines():
+            r = json.loads(l)
+            if (r.get("flags"), r.get("version"), r.get("model")) != (flags, version, model):
+                raise SystemExit(
+                    f"arm {args.arm!r} was started with flags={r.get('flags')} version={r.get('version')} "
+                    f"model={r.get('model')}; this run has flags={flags} version={version} model={model}. "
+                    "Use a new arm name.")
+            done.add(r["index"])
     for k, p in enumerate(problems):
         if p["index"] in done:
             continue
@@ -109,7 +121,8 @@ def cmd_run(args: argparse.Namespace, extra: list[str]) -> int:
         pred = extract(j["text"])
         rec = dict(index=p["index"], gold=p["answer"], pred=pred, correct=pred == canon(p["answer"]),
                    forward_passes=j["forward_passes"], generate_s=j["generate_s"],
-                   stopped_early=j.get("stopped_early"), text=j["text"], flags=flags, version=version)
+                   stopped_early=j.get("stopped_early"), text=j["text"], flags=flags, version=version,
+                   model=model)
         with out.open("a") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         print(f"[{k + 1}/{len(problems)}] #{p['index']} {'ok ' if rec['correct'] else 'BAD'} "
@@ -124,8 +137,20 @@ def load_arm(name: str) -> dict[int, dict]:
     return {r["index"]: r for r in map(json.loads, path.read_text().splitlines())}
 
 
+def arm_config(name: str, rows: dict[int, dict]) -> dict:
+    """The arm's one configuration; refuse an arm that mixes several."""
+    configs = {(json.dumps(r.get("flags")), r.get("version"), r.get("model")) for r in rows.values()}
+    if len(configs) != 1:
+        raise SystemExit(f"arm {name!r} mixes configurations: {sorted(configs)}")
+    flags, version, model = configs.pop()
+    return dict(flags=json.loads(flags), version=version, model=model)
+
+
 def cmd_compare(a_name: str, b_name: str) -> int:
     A, B = load_arm(a_name), load_arm(b_name)
+    ca, cb = arm_config(a_name, A), arm_config(b_name, B)
+    if ca["model"] != cb["model"]:
+        raise SystemExit(f"the arms ran different models: {ca['model']} vs {cb['model']}")
     common = sorted(set(A) & set(B))
     if not common:
         raise SystemExit("the two arms share no problem")
@@ -133,17 +158,16 @@ def cmd_compare(a_name: str, b_name: str) -> int:
     b = sum(1 for i in common if A[i]["correct"] and not B[i]["correct"])
     c = sum(1 for i in common if not A[i]["correct"] and B[i]["correct"])
     d, lo, hi = paired_ci(b, c, n)
-    versions = sorted({A[i]["version"] for i in common} | {B[i]["version"] for i in common})
     doc = dict(
         date=dt.datetime.now().isoformat(timespec="seconds"), problems=n, arms=[a_name, b_name],
-        versions=versions,
+        problems_in_arm={a_name: len(A), b_name: len(B)},
+        config={a_name: ca, b_name: cb},
         accuracy={a_name: sum(A[i]["correct"] for i in common) / n, b_name: sum(B[i]["correct"] for i in common) / n},
         difference=d, ci95=[lo, hi], discordant={"a_only": b, "b_only": c}, mcnemar_p=mcnemar_exact(b, c),
         forward_passes_mean={a_name: sum(A[i]["forward_passes"] for i in common) / n,
                              b_name: sum(B[i]["forward_passes"] for i in common) / n},
         generate_s_mean={a_name: sum(A[i]["generate_s"] for i in common) / n,
                          b_name: sum(B[i]["generate_s"] for i in common) / n},
-        flags={a_name: A[common[0]]["flags"], b_name: B[common[0]]["flags"]},
     )
     out = ROOT / "bench" / "eval" / f"{dt.date.today().isoformat()}-{a_name}-vs-{b_name}.json"
     out.write_text(json.dumps(doc, indent=2) + "\n")

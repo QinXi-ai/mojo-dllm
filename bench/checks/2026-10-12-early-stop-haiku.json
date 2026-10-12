@@ -1,0 +1,19 @@
+{
+  "date": "2026-10-12",
+  "version": "3ebe8d6",
+  "claim": "Early stop prints the same text with fewer forward passes.",
+  "prompt": "Write a haiku about the sea.",
+  "flags": "--max-tokens 128 --steps 32 --block-length 32 --device gpu",
+  "same_text": true,
+  "text": "Ocean's vast embrace\n\nWaves whisper softly\n\nNature's timeless song",
+  "early_stop": {
+    "forward_passes": 8,
+    "stopped_early": true,
+    "generate_s": 4.361757216
+  },
+  "no_early_stop": {
+    "forward_passes": 32,
+    "stopped_early": false,
+    "generate_s": 17.453230022
+  }
+}
