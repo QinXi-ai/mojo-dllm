@@ -23,12 +23,18 @@ mojo-dllm logits   --model PATH --tokens IDS --rows POSITIONS --out FILE [--thre
 | `--device D` | `cpu` | `cpu`, or `gpu` for an NVIDIA GPU with compute capability 8.0 or newer |
 | `--no-chat` | off | skip the chat template |
 | `--full-logits` | off | compute logits for every position, as a generic runtime would (for benchmarking) |
+| `--no-early-stop` | off | run every step even after the answer is final (the benchmark and parity harnesses use it) |
 | `--visual` | off | redraw the canvas after every step: masked positions as teal blocks, tokens committed in that step in bold orange |
 | `--verbose` | off | timings and memory after the text |
 | `--dump-step-stats` | off | one line per denoising step |
 | `--json` | off | one JSON object with timings, tokens and text |
 
-Generation stops at the first end-of-text or end-of-turn token in the canvas.
+The printed answer ends at the first end-of-text or end-of-turn token in the
+canvas. Generation stops as soon as that answer is final: once the first
+position after the prompt that is still masked or holds such a token holds
+such a token, no later step can change the printed text, because steps only
+fill masked positions. The result is the same text with fewer steps, and
+`--json` reports `"stopped_early": true`. `--no-early-stop` runs every step.
 
 ## `tokenize`
 

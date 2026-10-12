@@ -156,6 +156,9 @@ flags.
   Q6_K group. Attention gives each
   thread block 16 queries and streams the keys through shared memory.
   [The GPU path](docs/kernels.md#the-gpu-path) has the details.
+- **Stop when the answer is final.** Steps only fill masked positions, so
+  once an end-of-text token follows a fully committed answer, no later step
+  can change the printed text. mojo-dllm stops there, with the same output.
 - **Logits only where the sampler looks.** A step needs logits for the masked
   positions of the current block alone, so the 126 464-way output projection
   runs on those rows.

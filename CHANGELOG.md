@@ -8,6 +8,14 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
+- Generation stops once the printed answer is final (an end-of-text token
+  after a fully committed answer). The output is identical; `--no-early-stop`
+  runs every step, and the harnesses pass it so comparisons stay step for
+  step.
+- `scripts/gpu_profile.py` (per-kernel device time from an Nsight Systems
+  trace), `bench/bench_gpu_gemm.mojo`, and `bench/eval_gsm8k.py`, a paired
+  GSM8K-200 evaluation for changes that are not exact.
+
 - NVIDIA GPU backend, `--device gpu`, for compute capability 8.0 and newer.
   Projections read the GGUF Q4_K / Q6_K blocks on the GPU and multiply on the
   int8 tensor cores; attention runs flash-style. GPU tests check each kernel
@@ -23,6 +31,10 @@ semantic versioning (0.y: minor bumps may break things).
   of `llama-bench`.
 
 ### Changed
+
+- The GPU GEMM runs a weight tile's token tiles back to back, so they share
+  it through L2. Results are bit-identical; `bench/profiles/2026-10-12-gemm-*`
+  hold four interleaved before/after traces.
 
 - The samplers' per-row confidence pass runs on `--threads` workers. Each
   row's arithmetic is unchanged, so tokens do not depend on the thread count.

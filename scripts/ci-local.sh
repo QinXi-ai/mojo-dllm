@@ -102,7 +102,7 @@ md_lint() {
     need markdownlint-cli2 && markdownlint-cli2 "*.md" "docs/**/*.md" "#docs/spec.md" "#node_modules"
 }
 claims() {
-    python3 scripts/bench_table.py --check
+    python3 scripts/bench_table.py --check && python3 bench/eval_gsm8k.py --self-test
 }
 action_pins() {
     # Resolves each pinned SHA's tag through the GitHub API, so it needs gh.

@@ -58,6 +58,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: python scripts/bench_table.py --check
 
+      - name: GSM8K eval harness self-test
+        if: ${{ !cancelled() }}
+        run: python bench/eval_gsm8k.py --self-test
+
       - name: Action pins match the tags in their comments
         if: ${{ !cancelled() }}
         env:
