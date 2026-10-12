@@ -64,6 +64,8 @@ Versions: mojo-dllm `bdd268b`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`, diffu
 
 Versions: mojo-dllm `2b7b6b9`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evidence: `bench/results/2026-10-09-gpu-llada.json`.
 
+6 of 18 runs started with the CPU more than 10% busy (the harness waits for a quiet CPU, then runs anyway and records the load). The quiet runs alone give mojo-dllm `--device gpu` 429 ms / step and 2.5 s startup (6 runs); llama.cpp `llama-diffusion-cli`, CUDA, all layers offloaded 178 ms / step and 1.7 s startup (6 runs).
+
 **Dream-v0-Instruct-7B**, Q4_K_M. 13th Gen Intel(R) Core(TM) i5-13420H, 12 threads, 33.3 GB RAM, `performance` power profile. Each prompt: 128 generated tokens, 32 denoising steps; median of 3 runs x 3 prompts.
 
 | Runtime | ms / step | tokens / s | startup | peak RSS | language |
@@ -92,7 +94,7 @@ Versions: mojo-dllm `2b7b6b9`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evide
 | llama.cpp | 8 | 6,140 | 6,242 ms |
 | llama.cpp | 12 | 5,703 | 5,748 ms |
 
-The ms / step column runs `llama-diffusion-cli`. The forward pass alone is mojo-dllm's measured forward pass against llama.cpp's `llama-bench` at the same token count. `llama-bench` applies a causal mask and computes logits for one position; mojo-dllm's figure includes logits for up to 32 positions and copying the canvas in. CPU busy before a run: at most 6%. Evidence: `bench/results/2026-10-09-fair-cpu-llada.json`.
+The ms / step column runs `llama-diffusion-cli`. The forward pass alone is mojo-dllm's measured forward pass against llama.cpp's `llama-bench` at the same token count. `llama-bench` applies a causal mask and computes logits for one position; mojo-dllm's figure includes logits for up to 32 positions and copying the canvas in. CPU busy before a run: at most 6.5%. Evidence: `bench/results/2026-10-09-fair-cpu-llada.json`.
 
 **LLaDA-8B-Instruct on the GPU, forward pass alone**: NVIDIA GeForce RTX 3050 6GB Laptop GPU; median of 3 runs, one prompt, canvas 148 tokens.
 
@@ -101,13 +103,13 @@ The ms / step column runs `llama-diffusion-cli`. The forward pass alone is mojo-
 | mojo-dllm `--device gpu` | 423 | 418 ms |
 | llama.cpp CUDA, `llama-bench -p 148` | | 175 ms |
 
-The forward pass alone is mojo-dllm's measured forward pass against llama.cpp's `llama-bench` at the same token count. `llama-bench` applies a causal mask and computes logits for one position; mojo-dllm's figure includes logits for up to 32 positions and copying the canvas in. Evidence: `bench/results/2026-10-09-fair-gpu-llada.json`.
+The forward pass alone is mojo-dllm's measured forward pass against llama.cpp's `llama-bench` at the same token count. `llama-bench` applies a causal mask and computes logits for one position; mojo-dllm's figure includes logits for up to 32 positions and copying the canvas in. CPU busy before a run: at most 96.7%. Evidence: `bench/results/2026-10-09-fair-gpu-llada.json`.
 <!-- bench:end -->
 
 On the CPU, mojo-dllm is the fastest runtime in these tables. The fairness
-runs check that lead: llama.cpp does best at its default 12 threads, and
-mojo-dllm's forward pass alone stays ahead of `llama-bench`, so skipping
-logits explains only part of it. On the GPU, llama.cpp's CUDA build is faster.
+runs check that lead: llama.cpp is fastest at 12 threads, the most this CPU
+runs, and mojo-dllm's forward pass alone stays ahead of `llama-bench`. The
+ablation row shows that skipping logits saves only a small part of the gap. On the GPU, llama.cpp's CUDA build is faster.
 mojo-dllm's tensor-core kernels are a first version, and what they give you
 today is a small host footprint: the weights live in GPU memory.
 
@@ -133,8 +135,9 @@ build/mojo-dllm run --model LLaDA-8B-Instruct.Q4_K_M.gguf \
 You need Linux on x86-64 with AVX2 and about 6 GB of free memory. Pixi
 installs the pinned Mojo toolchain into the project directory.
 
-On an NVIDIA GPU with compute capability 8.0 or newer (RTX 30 series and
-later), add `--device gpu`. The weights then live in GPU memory; if the card
+On an NVIDIA GPU with compute capability 8.0 or newer, add `--device gpu`.
+It has been measured on an RTX 3050 Laptop GPU; other cards in that range
+should work but are untested. The weights then live in GPU memory; if the card
 has too little free, mojo-dllm says how much it needs and exits. The
 [quick start guide](docs/quickstart.md) covers `inspect`, `tokenize` and the
 flags.

@@ -23,7 +23,7 @@ minutes](diffusion.md) walks through it with a picture.
   Dream-v0-Instruct-7B (Q4_K_M) on x86 CPUs with AVX2, using AVX-VNNI when
   present.
 - `--device gpu` runs both models on NVIDIA GPUs with compute capability 8.0
-  or newer (RTX 30 series and later).
+  or newer. It has been measured on an RTX 3050 Laptop GPU only.
 - Both tokenizers match llama.cpp id for id on a 36-case multilingual corpus.
 - Logits match llama.cpp's implementation of both models; the measured
   agreement is in [Correctness](correctness.md).

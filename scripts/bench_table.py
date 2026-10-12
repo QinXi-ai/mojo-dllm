@@ -13,6 +13,7 @@ that was stopped) is refused, and so is a runtime that appears in two files.
 from __future__ import annotations
 
 import json
+import statistics
 import pathlib
 import sys
 
@@ -65,6 +66,8 @@ def load() -> dict[str, dict]:
         label = model_label(doc) + (" (GPU)" if gpu else "")
         g = groups.setdefault(label, dict(merged={}, meta={}, sources=[], gpu=gpu))
         g["sources"].append(f.name)
+        g.setdefault("runs", []).extend(doc["runs"])
+        g.setdefault("busy_threshold", doc["config"].get("busy_threshold", 0.1))
         for rt, s in doc["summary"].items():
             if rt in g["merged"]:
                 raise SystemExit(f"bench_table: {label} / {rt} appears in more than one result file")
@@ -134,7 +137,7 @@ def fairness() -> str:
                 out.append(f"| llama.cpp | {t} | {step} | {fwd} |")
         busy = [r["cpu_busy_before"] for r in doc["runs"]]
         steps = "" if is_gpu(doc) else "The ms / step column runs `llama-diffusion-cli`. "
-        cpu_note = "" if is_gpu(doc) else f" CPU busy before a run: at most {max(busy):.0%}."
+        cpu_note = f" CPU busy before a run: at most {max(busy):.1%}."
         out += [
             "",
             f"{steps}The forward pass alone is mojo-dllm's measured forward pass against llama.cpp's "
@@ -144,6 +147,34 @@ def fairness() -> str:
             f"Evidence: `bench/results/{f.name}`.",
         ]
     return "\n".join(out)
+
+
+def busy_note(runs: list[dict], threshold: float, rows: list) -> list[str]:
+    """Disclose runs that started on a busy CPU, with medians over the quiet ones.
+
+    The harness waits for a quiet CPU but gives up after max_quiet_wait_s and
+    runs anyway, recording how busy the CPU was. Those runs stay in the table;
+    this note says how many there were and what the quiet runs alone give.
+    """
+    ok = [r for r in runs if r.get("ok")]
+    busy = [r for r in ok if r.get("cpu_busy_before", 0) > threshold]
+    if not busy:
+        return []
+    parts = []
+    for key, label, _ in rows:
+        quiet = [r for r in ok if r["runtime"] == key and r.get("cpu_busy_before", 0) <= threshold
+                 and r.get("ms_per_step") is not None]
+        if not quiet or not any(r["runtime"] == key for r in busy):
+            continue
+        step = statistics.median(r["ms_per_step"] for r in quiet)
+        start = statistics.median(r["startup_s"] for r in quiet)
+        name = label.replace("**", "")
+        parts.append(f"{name} {step:,.0f} ms / step and {start:.1f} s startup ({len(quiet)} runs)")
+    note = (f"{len(busy)} of {len(ok)} runs started with the CPU more than {threshold:.0%} busy "
+            "(the harness waits for a quiet CPU, then runs anyway and records the load).")
+    if parts:
+        note += " The quiet runs alone give " + "; ".join(parts) + "."
+    return ["", note]
 
 
 def render() -> str:
@@ -193,6 +224,7 @@ def render() -> str:
             + (f", diffuse-cpp `{v['diffuse-cpp']}`" if any(k.startswith("diffuse") for k in merged) else "")
             + f". Evidence: {', '.join(f'`bench/results/{s}`' for s in sources)}.",
         ]
+        out += busy_note(g["runs"], g["busy_threshold"], ROWS)
         if "diffuse-cpp-cache-entropy-exit" in merged:
             out += [
                 "",
