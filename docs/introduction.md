@@ -6,9 +6,10 @@
 # Introduction
 
 mojo-dllm runs **LLaDA-8B** and **Dream-7B**, two diffusion language models,
-on your own CPU from quantized GGUF files. The whole inference path is Mojo: the GGUF reader, the
-tokenizer, the quantized matrix multiply, the transformer and the denoising
-loop. You need no Python at runtime and no GPU.
+from quantized GGUF files on your own CPU or on an NVIDIA GPU. The whole
+inference path is Mojo: the GGUF reader, the tokenizer, the quantized matrix
+multiply, the GPU kernels, the transformer and the denoising loop. You need
+no Python at runtime, and the GPU is optional.
 
 A diffusion language model writes differently from the models you know. An
 autoregressive model appends one token at a time. LLaDA starts from a canvas
@@ -21,6 +22,8 @@ minutes](diffusion.md) walks through it with a picture.
 - `mojo-dllm run` generates text from LLaDA-8B-Instruct and
   Dream-v0-Instruct-7B (Q4_K_M) on x86 CPUs with AVX2, using AVX-VNNI when
   present.
+- `--device gpu` runs both models on NVIDIA GPUs with compute capability 8.0
+  or newer (RTX 30 series and later).
 - Both tokenizers match llama.cpp id for id on a 36-case multilingual corpus.
 - Logits match llama.cpp's implementation of both models; the measured
   agreement is in [Correctness](correctness.md).
@@ -29,7 +32,8 @@ minutes](diffusion.md) walks through it with a picture.
 
 ## What does not work yet
 
-- No GPU backend. The plan targets NVIDIA consumer cards next.
+- The GPU path is slower than llama.cpp's CUDA build; [Benchmarks](benchmarks.md)
+  has the numbers. It supports NVIDIA only.
 - Two architectures: LLaDA and Dream. Others stop with
   `unsupported model architecture: <name>`.
 - One quantization mix: the F32, Q4_K and Q6_K tensors a Q4_K_M file
