@@ -50,6 +50,10 @@ struct GenConfig(Copyable, Movable):
     var threads: Int
     """Workers for the per-row confidence pass; each row's arithmetic is the
     same whatever the count, so results do not depend on it."""
+    var early_stop: Bool
+    """Stop once the visible answer is fixed (see `answer_is_fixed`)."""
+    var stop_ids: List[Int]
+    """End-of-text tokens: the CLI prints the canvas up to the first of them."""
 
     def __init__(out self):
         self.gen_length = 128
@@ -62,6 +66,8 @@ struct GenConfig(Copyable, Movable):
         self.full_logits = False
         self.eps = 1e-3
         self.threads = 1
+        self.early_stop = True
+        self.stop_ids = List[Int]()
 
 
 struct GenResult(Movable):
@@ -69,12 +75,14 @@ struct GenResult(Movable):
     var step_ms: List[Float64]
     var forward_passes: Int
     var seconds: Float64
+    var stopped_early: Bool
 
     def __init__(out self):
         self.tokens = List[Int]()
         self.step_ms = List[Float64]()
         self.forward_passes = 0
         self.seconds = 0.0
+        self.stopped_early = False
 
 
 struct Rng(Movable):
@@ -245,6 +253,27 @@ def _greedy_rows(
     return (toks^, confs^)
 
 
+def answer_is_fixed(
+    tokens: List[Int], P: Int, mask_id: Int, stop_ids: List[Int]
+) -> Bool:
+    """True once no later step can change the text a reader sees.
+
+    The visible answer is the canvas from P up to the first stop token. Steps
+    only ever fill masked positions, so once the first position that is
+    masked or a stop token is a stop token, every visible token is final.
+    Stopping there is exact for the printed text; the positions after it
+    stay masked in the returned canvas.
+    """
+    for i in range(P, len(tokens)):
+        var t = tokens[i]
+        if t == mask_id:
+            return False
+        for s in stop_ids:
+            if t == s:
+                return True
+    return False
+
+
 def generate[
     M: DenoisingModel
 ](mut model: M, prompt: List[Int], cfg: GenConfig) raises -> GenResult:
@@ -358,6 +387,13 @@ def _generate_llada[
                 committed.append(cand[j])
             res.step_ms.append(Float64(perf_counter_ns() - t_step) / 1e6)
             obs.on_step(res.tokens, committed, res.forward_passes, cfg.steps)
+            if cfg.early_stop and answer_is_fixed(
+                res.tokens, P, cfg.mask_id, cfg.stop_ids
+            ):
+                res.stopped_early = True
+                break
+        if res.stopped_early:
+            break
     res.seconds = Float64(perf_counter_ns() - t_start) / 1e9
     return res^
 
@@ -488,5 +524,10 @@ def _generate_dream[
                 committed.append(cand[j])
         res.step_ms.append(Float64(perf_counter_ns() - t_step) / 1e6)
         obs.on_step(res.tokens, committed, res.forward_passes, cfg.steps)
+        if cfg.early_stop and answer_is_fixed(
+            res.tokens, P, cfg.mask_id, cfg.stop_ids
+        ):
+            res.stopped_early = True
+            break
     res.seconds = Float64(perf_counter_ns() - t_start) / 1e9
     return res^

@@ -164,6 +164,62 @@ def test_greedy_rows_match_the_sequential_scorers() raises:
             )
 
 
+def _visible(tokens: List[Int], P: Int, stop: Int) -> List[Int]:
+    """The generated tokens a reader sees: up to the first stop token."""
+    var out = List[Int]()
+    for i in range(P, len(tokens)):
+        if tokens[i] == stop:
+            break
+        out.append(tokens[i])
+    return out^
+
+
+def _check_early_stop(path: String, mask: Int, block: Int) raises:
+    var m = DiffusionLM(FIX + path, threads=2, max_tokens=24)
+    var prompt: List[Int] = [5, 17, 300]
+    var P = len(prompt)
+    var c = GenConfig()
+    c.gen_length = 16
+    c.block_length = block
+    c.steps = 16
+    c.mask_id = mask
+    c.early_stop = False
+    var full = generate(m, prompt, c)
+    var saved_any = False
+    # Each token of the full answer in turn plays the end-of-text token.
+    for i in range(P, len(full.tokens)):
+        var stop = full.tokens[i]
+        var e = c.copy()
+        e.early_stop = True
+        e.stop_ids = [stop]
+        var early = generate(m, prompt, e)
+        var want = _visible(full.tokens, P, stop)
+        var got = _visible(early.tokens, P, stop)
+        assert_equal(
+            len(got), len(want), path + " visible length, stop " + String(stop)
+        )
+        for j in range(len(want)):
+            assert_equal(got[j], want[j], path + " visible token " + String(j))
+        assert_true(
+            early.forward_passes <= full.forward_passes,
+            "early stop ran more passes",
+        )
+        if early.forward_passes < full.forward_passes:
+            saved_any = True
+    assert_true(
+        saved_any,
+        path + ": no stop token ever saved a pass, so the check is vacuous",
+    )
+
+
+def test_early_stop_keeps_the_visible_answer_llada() raises:
+    _check_early_stop("tiny-llada.gguf", 511, 4)
+
+
+def test_early_stop_keeps_the_visible_answer_dream() raises:
+    _check_early_stop("tiny-dream.gguf", 510, 16)
+
+
 def test_rejects_bad_block_geometry() raises:
     var m = DiffusionLM(FIX + "tiny-llada.gguf", threads=2, max_tokens=16)
     var prompt: List[Int] = [5]
