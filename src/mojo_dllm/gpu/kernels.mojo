@@ -518,8 +518,13 @@ def stage_matrix(
 #   C 16 x 8: c0 (g, 2t), c1 (g, 2t+1), c2 (g+8, 2t), c3 (g+8, 2t+1)
 
 comptime BM = 64
-comptime BN = 32
+comptime BN_MAX = 80
+"""Widest token tile; gemm_gpu picks the width per call (see _pick_bn)."""
 comptime GEMM_THREADS = 128
+comptime WS4 = 9
+"""Shared row stride of the Q4_K sub-block scales (8 used)."""
+comptime WS6 = 17
+"""Shared row stride of the Q6_K group scales (16 used)."""
 comptime SW = 68
 """Shared row stride in 32-bit words: 256 bytes plus 16 of padding, so the 8
 rows a fragment load touches fall in different banks."""
@@ -553,7 +558,9 @@ comptime SharedI32 = Pointer[
 
 
 @always_inline
-def _stage_acts(
+def _stage_acts[
+    BN: Int
+](
     aq: I8Ptr,
     ad: F32Ptr,
     as_: F32Ptr,
@@ -562,41 +569,54 @@ def _stage_acts(
     t0: Int,
     b: Int,
     sA: SharedI32,
-    sAd: SharedF32,
-    sAs: SharedF32,
+    sAds: SharedF32,
 ):
-    """Copy BN tokens' activations for super-block b into shared memory."""
+    """Copy BN tokens' activations for super-block b into shared memory.
+
+    Scales go to sAds as [sub-block j][token][d, s]: the token pair a thread
+    folds after an mma is then four consecutive floats, one 128-bit load,
+    and the four lanes of a quad read disjoint banks.
+    """
     var th = Int(thread_idx.x)
-    var tok = th >> 2
-    var qtr = th & 3
-    var dst = sA.unsafe_offset(tok * SW + qtr * 16)
-    if t0 + tok < T:
-        var src = aq.unsafe_offset(
-            (t0 + tok) * k + b * 256 + qtr * 64
-        ).unsafe_bitcast[Int32]()
-        comptime for i in range(16):
-            dst[unsafe_offset=i] = src[unsafe_offset=i]
-    else:
-        comptime for i in range(16):
-            dst[unsafe_offset=i] = 0
+    comptime for rep in range((BN * 4 + GEMM_THREADS - 1) // GEMM_THREADS):
+        var unit = th + rep * GEMM_THREADS
+        if unit >= BN * 4:
+            break
+        var tok = unit >> 2
+        var qtr = unit & 3
+        var dst = sA.unsafe_offset(tok * SW + qtr * 16)
+        if t0 + tok < T:
+            var src = aq.unsafe_offset(
+                (t0 + tok) * k + b * 256 + qtr * 64
+            ).unsafe_bitcast[Int32]()
+            comptime for i in range(16):
+                dst[unsafe_offset=i] = src[unsafe_offset=i]
+        else:
+            comptime for i in range(16):
+                dst[unsafe_offset=i] = 0
     var nsub = k // QK
-    comptime for e in range(2):
-        var idx = th * 2 + e
+    comptime for e in range((BN * 8 + GEMM_THREADS - 1) // GEMM_THREADS):
+        var idx = th + e * GEMM_THREADS
+        if idx >= BN * 8:
+            break
         var tk = idx >> 3
         var j = idx & 7
+        var o = (j * BN + tk) * 2
         if t0 + tk < T:
-            sAd[unsafe_offset=idx] = ad[
+            sAds[unsafe_offset=o] = ad[
                 unsafe_offset=(t0 + tk) * nsub + b * 8 + j
             ]
-            sAs[unsafe_offset=idx] = as_[
+            sAds[unsafe_offset=o + 1] = as_[
                 unsafe_offset=(t0 + tk) * nsub + b * 8 + j
             ]
         else:
-            sAd[unsafe_offset=idx] = 0
-            sAs[unsafe_offset=idx] = 0
+            sAds[unsafe_offset=o] = 0
+            sAds[unsafe_offset=o + 1] = 0
 
 
-def _q4k_mma_kernel(
+def _q4k_mma_kernel[
+    BN: Int
+](
     w: U8Ptr,
     N: Int32,
     K: Int32,
@@ -613,17 +633,15 @@ def _q4k_mma_kernel(
     var sA = unsafe_stack_allocation[
         BN * SW, Int32, address_space=AddressSpace.SHARED
     ]()
+    # Row stride 9, not 8: rows g and g + 4 of a fragment would share banks.
     var sWs = unsafe_stack_allocation[
-        BM * 8, Float32, address_space=AddressSpace.SHARED
+        BM * WS4, Float32, address_space=AddressSpace.SHARED
     ]()
     var sWm = unsafe_stack_allocation[
-        BM * 8, Float32, address_space=AddressSpace.SHARED
+        BM * WS4, Float32, address_space=AddressSpace.SHARED
     ]()
-    var sAd = unsafe_stack_allocation[
-        BN * 8, Float32, address_space=AddressSpace.SHARED
-    ]()
-    var sAs = unsafe_stack_allocation[
-        BN * 8, Float32, address_space=AddressSpace.SHARED
+    var sAds = unsafe_stack_allocation[
+        BN * 16, Float32, alignment=16, address_space=AddressSpace.SHARED
     ]()
     var k = Int(K)
     var n_rows = Int(N)
@@ -639,7 +657,8 @@ def _q4k_mma_kernel(
     # Staging role: two threads per weight row, each unpacking half a super-block.
     var srow = th >> 1
     var shalf = th & 1
-    var acc = SIMD[DType.float32, 16](0)
+    comptime NT8 = BN // 8
+    var acc = Array[Float32, 4 * NT8](fill=0)
     for b in range(k // 256):
         # ---- stage weights
         var wdst = sW.unsafe_offset(srow * SW)
@@ -664,8 +683,9 @@ def _q4k_mma_kernel(
                         (scl[unsafe_offset=j + 4] >> 4)
                         | ((scl[unsafe_offset=j] >> 6) << 4)
                     )
-                sWs[unsafe_offset=srow * 8 + j] = d * Float32(sc)
-                sWm[unsafe_offset=srow * 8 + j] = dmin * Float32(mn)
+                sWs[unsafe_offset=srow * WS4 + j] = d * Float32(sc)
+                # Stored negated, so the fold is two fused multiply-adds.
+                sWm[unsafe_offset=srow * WS4 + j] = -dmin * Float32(mn)
             var qs = blk.unsafe_offset(16).unsafe_bitcast[Int32]()
             comptime for pp in range(2):
                 var p = 2 * shalf + pp
@@ -677,11 +697,11 @@ def _q4k_mma_kernel(
                     ) & 0x0F0F0F0F
         else:
             comptime for jj in range(4):
-                sWs[unsafe_offset=srow * 8 + 4 * shalf + jj] = 0
-                sWm[unsafe_offset=srow * 8 + 4 * shalf + jj] = 0
+                sWs[unsafe_offset=srow * WS4 + 4 * shalf + jj] = 0
+                sWm[unsafe_offset=srow * WS4 + 4 * shalf + jj] = 0
             comptime for i in range(32):
                 wdst[unsafe_offset=shalf * 32 + i] = 0
-        _stage_acts(aq, ad, as_, k, n_tok, t0, b, sA, sAd, sAs)
+        _stage_acts[BN](aq, ad, as_, k, n_tok, t0, b, sA, sAds)
         barrier()
         # ---- tensor cores
         var ra = (16 * warp + g) * SW
@@ -691,11 +711,11 @@ def _q4k_mma_kernel(
             var a1 = sW[unsafe_offset=rb + j * 8 + t]
             var a2 = sW[unsafe_offset=ra + j * 8 + 4 + t]
             var a3 = sW[unsafe_offset=rb + j * 8 + 4 + t]
-            var ws0 = sWs[unsafe_offset=(16 * warp + g) * 8 + j]
-            var ws1 = sWs[unsafe_offset=(16 * warp + g + 8) * 8 + j]
-            var wm0 = sWm[unsafe_offset=(16 * warp + g) * 8 + j]
-            var wm1 = sWm[unsafe_offset=(16 * warp + g + 8) * 8 + j]
-            comptime for nt in range(4):
+            var ws0 = sWs[unsafe_offset=(16 * warp + g) * WS4 + j]
+            var ws1 = sWs[unsafe_offset=(16 * warp + g + 8) * WS4 + j]
+            var wm0 = sWm[unsafe_offset=(16 * warp + g) * WS4 + j]
+            var wm1 = sWm[unsafe_offset=(16 * warp + g + 8) * WS4 + j]
+            comptime for nt in range(NT8):
                 var bo = (nt * 8 + g) * SW + j * 8 + t
                 var c = _mma_k32(
                     a0,
@@ -705,22 +725,23 @@ def _q4k_mma_kernel(
                     sA[unsafe_offset=bo],
                     sA[unsafe_offset=bo + 4],
                 )
-                var ta = (nt * 8 + 2 * t) * 8 + j
-                var da = sAd[unsafe_offset=ta]
-                var db = sAd[unsafe_offset=ta + 8]
-                var sa = sAs[unsafe_offset=ta]
-                var sb = sAs[unsafe_offset=ta + 8]
-                acc[nt * 4 + 0] += ws0 * da * Float32(c[0]) - wm0 * sa
-                acc[nt * 4 + 1] += ws0 * db * Float32(c[1]) - wm0 * sb
-                acc[nt * 4 + 2] += ws1 * da * Float32(c[2]) - wm1 * sa
-                acc[nt * 4 + 3] += ws1 * db * Float32(c[3]) - wm1 * sb
+                # (d, s) of tokens 2t and 2t + 1 in one 128-bit load.
+                var q = sAds.unsafe_offset(
+                    (j * BN + nt * 8 + 2 * t) * 2
+                ).unsafe_load[width=4, alignment=16]()
+                acc[nt * 4 + 0] += ws0 * q[0] * Float32(c[0]) + wm0 * q[1]
+                acc[nt * 4 + 1] += ws0 * q[2] * Float32(c[1]) + wm0 * q[3]
+                acc[nt * 4 + 2] += ws1 * q[0] * Float32(c[2]) + wm1 * q[1]
+                acc[nt * 4 + 3] += ws1 * q[2] * Float32(c[3]) + wm1 * q[3]
         barrier()
-    _store_tile(acc, dst, Int(ldo), r0, t0, n_rows, n_tok, warp, g, t)
+    _store_tile[BN](acc, dst, Int(ldo), r0, t0, n_rows, n_tok, warp, g, t)
 
 
 @always_inline
-def _store_tile(
-    acc: SIMD[DType.float32, 16],
+def _store_tile[
+    BN: Int
+](
+    acc: Array[Float32, 4 * (BN // 8)],
     dst: F32Ptr,
     ldo: Int,
     r0: Int,
@@ -732,7 +753,7 @@ def _store_tile(
     t: Int,
 ):
     var ra = r0 + 16 * warp + g
-    comptime for nt in range(4):
+    comptime for nt in range(BN // 8):
         var ta = t0 + nt * 8 + 2 * t
         comptime for e in range(4):
             var r = ra + (8 if e >= 2 else 0)
@@ -741,7 +762,9 @@ def _store_tile(
                 dst[unsafe_offset=tk * ldo + r] = acc[nt * 4 + e]
 
 
-def _q6k_mma_kernel(
+def _q6k_mma_kernel[
+    BN: Int
+](
     w: U8Ptr,
     N: Int32,
     K: Int32,
@@ -758,14 +781,12 @@ def _q6k_mma_kernel(
     var sA = unsafe_stack_allocation[
         BN * SW, Int32, address_space=AddressSpace.SHARED
     ]()
+    # Row stride 17, not 16: rows g and g + 2 would share banks.
     var sWs = unsafe_stack_allocation[
-        BM * 16, Float32, address_space=AddressSpace.SHARED
+        BM * WS6, Float32, address_space=AddressSpace.SHARED
     ]()
-    var sAd = unsafe_stack_allocation[
-        BN * 8, Float32, address_space=AddressSpace.SHARED
-    ]()
-    var sAs = unsafe_stack_allocation[
-        BN * 8, Float32, address_space=AddressSpace.SHARED
+    var sAds = unsafe_stack_allocation[
+        BN * 16, Float32, alignment=16, address_space=AddressSpace.SHARED
     ]()
     var k = Int(K)
     var n_rows = Int(N)
@@ -780,7 +801,8 @@ def _q6k_mma_kernel(
     var row_bytes = (k // 256) * Q6K_STAGED
     var srow = th >> 1
     var h = th & 1
-    var acc = SIMD[DType.float32, 16](0)
+    comptime NT8 = BN // 8
+    var acc = Array[Float32, 4 * NT8](fill=0)
     for b in range(k // 256):
         var wdst = sW.unsafe_offset(srow * SW)
         if r0 + srow < n_rows:
@@ -808,7 +830,7 @@ def _q6k_mma_kernel(
                     )
                 comptime for e in range(2):
                     sWs[
-                        unsafe_offset=srow * 16 + (4 * h + gg) * 2 + e
+                        unsafe_offset=srow * WS6 + (4 * h + gg) * 2 + e
                     ] = d * Float32(
                         bitcast[DType.int8](
                             blk[unsafe_offset=192 + 8 * h + 2 * gg + e]
@@ -818,8 +840,8 @@ def _q6k_mma_kernel(
             comptime for i in range(32):
                 wdst[unsafe_offset=h * 32 + i] = 0
             comptime for e in range(8):
-                sWs[unsafe_offset=srow * 16 + h * 8 + e] = 0
-        _stage_acts(aq, ad, as_, k, n_tok, t0, b, sA, sAd, sAs)
+                sWs[unsafe_offset=srow * WS6 + h * 8 + e] = 0
+        _stage_acts[BN](aq, ad, as_, k, n_tok, t0, b, sA, sAds)
         barrier()
         var ra = (16 * warp + g) * SW
         var rb = (16 * warp + g + 8) * SW
@@ -827,25 +849,25 @@ def _q6k_mma_kernel(
             comptime for e in range(2):
                 var a0 = sW[unsafe_offset=ra + j * 8 + e * 4 + t]
                 var a1 = sW[unsafe_offset=rb + j * 8 + e * 4 + t]
-                var ws0 = sWs[unsafe_offset=(16 * warp + g) * 16 + 2 * j + e]
+                var ws0 = sWs[unsafe_offset=(16 * warp + g) * WS6 + 2 * j + e]
                 var ws1 = sWs[
-                    unsafe_offset=(16 * warp + g + 8) * 16 + 2 * j + e
+                    unsafe_offset=(16 * warp + g + 8) * WS6 + 2 * j + e
                 ]
-                comptime for nt in range(4):
+                comptime for nt in range(NT8):
                     var c = _mma_k16(
                         a0,
                         a1,
                         sA[unsafe_offset=(nt * 8 + g) * SW + j * 8 + e * 4 + t],
                     )
-                    var ta = (nt * 8 + 2 * t) * 8 + j
-                    var da = sAd[unsafe_offset=ta]
-                    var db = sAd[unsafe_offset=ta + 8]
-                    acc[nt * 4 + 0] += ws0 * da * Float32(c[0])
-                    acc[nt * 4 + 1] += ws0 * db * Float32(c[1])
-                    acc[nt * 4 + 2] += ws1 * da * Float32(c[2])
-                    acc[nt * 4 + 3] += ws1 * db * Float32(c[3])
+                    var q = sAds.unsafe_offset(
+                        (j * BN + nt * 8 + 2 * t) * 2
+                    ).unsafe_load[width=4, alignment=16]()
+                    acc[nt * 4 + 0] += ws0 * q[0] * Float32(c[0])
+                    acc[nt * 4 + 1] += ws0 * q[2] * Float32(c[1])
+                    acc[nt * 4 + 2] += ws1 * q[0] * Float32(c[2])
+                    acc[nt * 4 + 3] += ws1 * q[2] * Float32(c[3])
         barrier()
-    _store_tile(acc, dst, Int(ldo), r0, t0, n_rows, n_tok, warp, g, t)
+    _store_tile[BN](acc, dst, Int(ldo), r0, t0, n_rows, n_tok, warp, g, t)
 
 
 def _mma_tile32_kernel(a: I8Ptr, b: I8Ptr, c: I32Ptr):
@@ -907,7 +929,9 @@ def mma_tile_gpu(
         raise Error("mma_tile_gpu takes K = 32 or 16")
 
 
-def gemm_gpu(
+def _launch[
+    BN: Int
+](
     ctx: DeviceContext,
     ggml_type: Int,
     w: U8Ptr,
@@ -918,16 +942,9 @@ def gemm_gpu(
     dst: F32Ptr,
     ldo: Int,
 ) raises:
-    """dst[t, r] = sum_k W[r, k] x[t, k] for r < N, t < n_tokens; W in its staged layout.
-    """
-    if K != qa.K or n_tokens > qa.max_tokens:
-        raise Error("activation buffer is the wrong shape")
-    # Token tiles vary fastest, so the few blocks that read one weight tile
-    # run back to back and share it through L2. With the row tile fastest,
-    # every token tile streamed the whole matrix from DRAM again.
     var grid = (_cdiv(n_tokens, BN), _cdiv(N, BM))
     if ggml_type == GGML_Q4_K:
-        ctx.enqueue_function[_q4k_mma_kernel](
+        ctx.enqueue_function[_q4k_mma_kernel[BN]](
             w,
             Int32(N),
             Int32(K),
@@ -942,7 +959,7 @@ def gemm_gpu(
         )
         return
     if ggml_type == GGML_Q6_K:
-        ctx.enqueue_function[_q6k_mma_kernel](
+        ctx.enqueue_function[_q6k_mma_kernel[BN]](
             w,
             Int32(N),
             Int32(K),
@@ -959,3 +976,46 @@ def gemm_gpu(
     raise Error(
         "the GPU backend has no matrix kernel for " + ggml_type_name(ggml_type)
     )
+
+
+def _pick_bn(n_tokens: Int) -> Int:
+    """Token tile width: the fewest tiles, then the narrowest tile.
+
+    A wider tile unpacks each weight tile once for more tokens, so it wins
+    whenever it saves a tile (148 tokens: 80 wide, 2 tiles, against 5 at 32;
+    bench/profiles/2026-10-12-gemmtile-* has the GEMM time before and after).
+    A tile wider than the canvas only wastes work, so the 32 rows of the LM
+    head keep 32. 80 is the widest whose shared memory fits the 48 KiB
+    static limit.
+    """
+    var best = 32
+    for bn in [32, 64, 80]:
+        if _cdiv(n_tokens, bn) < _cdiv(n_tokens, best):
+            best = bn
+    return best
+
+
+def gemm_gpu(
+    ctx: DeviceContext,
+    ggml_type: Int,
+    w: U8Ptr,
+    N: Int,
+    K: Int,
+    qa: GpuQActs,
+    n_tokens: Int,
+    dst: F32Ptr,
+    ldo: Int,
+) raises:
+    """dst[t, r] = sum_k W[r, k] x[t, k] for r < N, t < n_tokens; W in its staged layout.
+    """
+    if K != qa.K or n_tokens > qa.max_tokens:
+        raise Error("activation buffer is the wrong shape")
+    var bn = _pick_bn(n_tokens)
+    if bn == 32:
+        _launch[32](ctx, ggml_type, w, N, K, qa, n_tokens, dst, ldo)
+    elif bn == 64:
+        _launch[64](ctx, ggml_type, w, N, K, qa, n_tokens, dst, ldo)
+    elif bn == 80:
+        _launch[80](ctx, ggml_type, w, N, K, qa, n_tokens, dst, ldo)
+    else:
+        raise Error("no GEMM tile of width " + String(bn))

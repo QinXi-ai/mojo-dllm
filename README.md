@@ -59,12 +59,10 @@ Versions: mojo-dllm `bdd268b`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`, diffu
 
 | Runtime | ms / step | tokens / s | startup | peak RSS | language |
 |---|---:|---:|---:|---:|---|
-| **mojo-dllm** `--device gpu` | 429 | 9.33 | 4.3 s | 1.0 GB | Mojo |
-| llama.cpp `llama-diffusion-cli`, CUDA, all layers offloaded | 179 | 22.40 | 1.7 s | 5.2 GB | C/C++, CUDA |
+| **mojo-dllm** `--device gpu` | 424 | 9.43 | 2.9 s | 1.0 GB | Mojo |
+| llama.cpp `llama-diffusion-cli`, CUDA, all layers offloaded | 255 | 15.68 | 2.0 s | 5.2 GB | C/C++, CUDA |
 
-Versions: mojo-dllm `2b7b6b9`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evidence: `bench/results/2026-10-09-gpu-llada.json`.
-
-6 of 18 runs started with the CPU more than 10% busy (the harness waits for a quiet CPU, then runs anyway and records the load). The quiet runs alone give mojo-dllm `--device gpu` 429 ms / step and 2.5 s startup (6 runs); llama.cpp `llama-diffusion-cli`, CUDA, all layers offloaded 178 ms / step and 1.7 s startup (6 runs).
+Versions: mojo-dllm `78014b4`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evidence: `bench/results/2026-10-12-gpu-llada.json`.
 
 **Dream-v0-Instruct-7B**, Q4_K_M. 13th Gen Intel(R) Core(TM) i5-13420H, 12 threads, 33.3 GB RAM, `performance` power profile. Each prompt: 128 generated tokens, 32 denoising steps; median of 3 runs x 3 prompts.
 
@@ -79,10 +77,10 @@ Versions: mojo-dllm `bdd268b`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evide
 
 | Runtime | ms / step | tokens / s | startup | peak RSS | language |
 |---|---:|---:|---:|---:|---|
-| **mojo-dllm** `--device gpu` | 406 | 9.86 | 2.5 s | 1.1 GB | Mojo |
-| llama.cpp `llama-diffusion-cli`, CUDA, all layers offloaded | 169 | 23.67 | 1.7 s | 4.9 GB | C/C++, CUDA |
+| **mojo-dllm** `--device gpu` | 412 | 9.71 | 2.9 s | 1.1 GB | Mojo |
+| llama.cpp `llama-diffusion-cli`, CUDA, all layers offloaded | 234 | 17.08 | 1.9 s | 4.9 GB | C/C++, CUDA |
 
-Versions: mojo-dllm `2b7b6b9`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evidence: `bench/results/2026-10-09-gpu-dream.json`.
+Versions: mojo-dllm `036ef79`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evidence: `bench/results/2026-10-12-gpu-dream.json`.
 
 **LLaDA-8B-Instruct, llama.cpp thread sweep and forward pass alone**: 13th Gen Intel(R) Core(TM) i5-13420H; median of 2 runs, one prompt, canvas 148 tokens.
 
@@ -100,10 +98,10 @@ The ms / step column runs `llama-diffusion-cli`. The forward pass alone is mojo-
 
 | Runtime | ms / step | forward pass alone |
 |---|---:|---:|
-| mojo-dllm `--device gpu` | 423 | 418 ms |
-| llama.cpp CUDA, `llama-bench -p 148` | | 175 ms |
+| mojo-dllm `--device gpu` | 419 | 415 ms |
+| llama.cpp CUDA, `llama-bench -p 148` | | 264 ms |
 
-The forward pass alone is mojo-dllm's measured forward pass against llama.cpp's `llama-bench` at the same token count. `llama-bench` applies a causal mask and computes logits for one position; mojo-dllm's figure includes logits for up to 32 positions and copying the canvas in. CPU busy before a run: at most 96.7%. Evidence: `bench/results/2026-10-09-fair-gpu-llada.json`.
+The forward pass alone is mojo-dllm's measured forward pass against llama.cpp's `llama-bench` at the same token count. `llama-bench` applies a causal mask and computes logits for one position; mojo-dllm's figure includes logits for up to 32 positions and copying the canvas in. CPU busy before a run: at most 8.9%. Evidence: `bench/results/2026-10-12-fair-gpu-llada.json`.
 <!-- bench:end -->
 
 On the CPU, mojo-dllm is the fastest runtime in these tables. The fairness
