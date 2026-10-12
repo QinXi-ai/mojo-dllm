@@ -421,23 +421,24 @@ struct GpuQActs(Movable):
 def _quantize_kernel(
     x: F32Ptr, q: I8Ptr, ds: F32Ptr, ss: F32Ptr, n_blocks: Int32
 ):
-    var b = Int(block_idx.x) * NT + Int(thread_idx.x)
+    # One warp per 32-value block, one value per lane, so loads and stores
+    # are coalesced. max and an integer sum do not depend on the order of
+    # the reduction, so the result is the same as a sequential loop's.
+    # QK is 32, the warp width.
+    var b = Int(block_idx.x) * (NT // 32) + Int(warp_id())
     if b >= Int(n_blocks):
         return
-    var src = x.unsafe_offset(b * QK)
-    var amax = Float32(0)
-    for i in range(QK):
-        amax = max(amax, abs(src[unsafe_offset=i]))
+    var i = b * QK + Int(lane_id())
+    var v = x[unsafe_offset=i]
+    var amax = warp_max(abs(v))
     var d = amax / 127.0
     var inv = Float32(0) if amax == 0 else 127.0 / amax
-    var sum = 0
-    var dst = q.unsafe_offset(b * QK)
-    for i in range(QK):
-        var v = Int(round(src[unsafe_offset=i] * inv))
-        dst[unsafe_offset=i] = Int8(v)
-        sum += v
-    ds[unsafe_offset=b] = d
-    ss[unsafe_offset=b] = d * Float32(sum)
+    var qv = Int32(round(v * inv))
+    q[unsafe_offset=i] = Int8(qv)
+    var sum = warp_sum(qv)
+    if lane_id() == 0:
+        ds[unsafe_offset=b] = d
+        ss[unsafe_offset=b] = d * Float32(sum)
 
 
 def quantize_gpu(
@@ -452,7 +453,7 @@ def quantize_gpu(
         dev_f32(qa.d),
         dev_f32(qa.s),
         Int32(nb),
-        grid_dim=_cdiv(nb, NT),
+        grid_dim=_cdiv(nb, NT // 32),
         block_dim=NT,
     )
 
