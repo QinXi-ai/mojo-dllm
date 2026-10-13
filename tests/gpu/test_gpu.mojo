@@ -412,10 +412,10 @@ def _check_forward(path: String, vocab: Int, bound: Float64) raises:
 
 
 def test_forward_llada_matches_cpu() raises:
-    # Attention runs in f16 on the GPU. This random-weight fixture's attention
-    # scores are large, so f16 rounding of Q and K roughly doubles its error
-    # against the f32 reference (0.017 with f32 attention, 0.036 with f16).
-    # On LLaDA-8B the f16 kernel tracks the CPU as closely as the f32 one did
+    # Attention runs in f16 on the GPU. This random-weight fixture is more
+    # sensitive to f16 rounding of Q and K than a trained model: its error
+    # against the f32 reference went from 0.017 (f32 attention) to 0.036. On
+    # LLaDA-8B the f16 kernel tracks the CPU as closely as the f32 one did
     # (bench/checks/2026-10-13-attention-f16-logits.json).
     _check_forward("tiny-llada.gguf", 512, 0.05)
 
