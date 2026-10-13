@@ -3,6 +3,7 @@
 
 usage: python3 scripts/gpu_profile.py --model MODEL.gguf --label NAME [--steps 4] [--max-tokens 128]
                                       [--prompt TEXT] [--out bench/profiles/DATE-NAME.json]
+                                      [--runtime mojo-dllm|llama.cpp] [--seq-len N]
 
 The run is traced with `nsys profile --trace=cuda`, which records every kernel's
 device start and end without synchronizing the stream, unlike
@@ -10,6 +11,12 @@ MOJO_DLLM_GPU_PROFILE=1. It needs no admin rights. The result groups kernels by
 name (and the matrix multiplies by output size), divides by the number of
 forward passes, and records host<->device copies, so a change to one kernel
 can be compared before and after from committed evidence.
+
+`--runtime llama.cpp` traces llama.cpp's `llama-diffusion-cli` (the CUDA build
+in ~/src/llama.cpp/build-cuda, every layer offloaded) on the same prompt, so
+the two runtimes' kernels can be compared group by group. llama.cpp replays
+its forward pass as a CUDA graph, so the trace expands graph nodes; its
+canvas is `--seq-len` tokens (mojo-dllm's prompt plus `--max-tokens`).
 """
 
 from __future__ import annotations
@@ -44,6 +51,19 @@ GROUPS = [
     ("copy_r", "copy_rows"),
     ("mma_ti", "mma_tile"),
 ]
+LLAMA_GROUPS = [
+    ("mul_mat_q<(ggml_type)12", "gemm_q4k"),
+    ("mul_mat_q<(ggml_type)14", "gemm_q6k"),
+    ("mul_mat_q_stream_k_fixup", "gemm_fixup"),
+    ("flash_attn", "attention"),
+    ("quantize_mmq", "quantize"),
+    ("rms_norm", "rmsnorm"),
+    ("rope", "rope"),
+    ("unary_gated_op_kernel<&op_silu", "silu_mul"),
+    ("k_bin_bcast<&op_add", "add"),
+    ("cpy_scalar", "copy_f16"),
+    ("k_get_rows", "get_rows"),
+]
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -53,8 +73,8 @@ def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return p
 
 
-def group_of(name: str) -> str:
-    for key, label in GROUPS:
+def group_of(name: str, groups: list[tuple[str, str]] = GROUPS) -> str:
+    for key, label in groups:
         if key in name:
             return label
     return "other:" + re.sub(r"_[0-9a-f]{16}$", "", name)[:60]
@@ -71,6 +91,9 @@ def main() -> int:
     ap.add_argument("--out", default=None)
     ap.add_argument("--root", default=str(ROOT),
                     help="checkout whose build/mojo-dllm runs and whose commit is recorded (for A/B runs)")
+    ap.add_argument("--runtime", choices=["mojo-dllm", "llama.cpp"], default="mojo-dllm")
+    ap.add_argument("--seq-len", type=int, default=0, help="llama.cpp canvas length (prompt + generated)")
+    ap.add_argument("--llama-cpp", default=os.path.expanduser("~/src/llama.cpp"))
     args = ap.parse_args()
     importer = next((p for p in IMPORTERS if os.path.exists(p)), None)
     if importer is None:
@@ -79,15 +102,39 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     base = out_dir / args.label
     root = pathlib.Path(args.root).resolve()
-    cmd = [str(root / "build/mojo-dllm"), "run", "--model", os.path.expanduser(args.model), "--prompt", args.prompt,
-           "--max-tokens", str(args.max_tokens), "--steps", str(args.steps), "--block-length",
-           str(args.block_length), "--device", "gpu", "--json", "--no-early-stop"]
+    llama = args.runtime == "llama.cpp"
+    if llama:
+        if args.seq_len <= 0:
+            raise SystemExit("gpu_profile: --runtime llama.cpp needs --seq-len (prompt tokens + --max-tokens)")
+        cmd = [args.llama_cpp + "/build-cuda/bin/llama-diffusion-cli", "-m", os.path.expanduser(args.model),
+               "-p", args.prompt, "-c", str(args.seq_len), "-b", str(args.seq_len), "-ub", str(args.seq_len),
+               "--diffusion-steps", str(args.steps), "--diffusion-eps", "0.001", "--temp", "0",
+               "--seed", "42", "-ngl", "99", "-v"]
+        graph = ["--cuda-graph-trace=node"]
+    else:
+        cmd = [str(root / "build/mojo-dllm"), "run", "--model", os.path.expanduser(args.model), "--prompt", args.prompt,
+               "--max-tokens", str(args.max_tokens), "--steps", str(args.steps), "--block-length",
+               str(args.block_length), "--device", "gpu", "--json", "--no-early-stop"]
+        graph = []
     p = run(["nsys", "profile", "-o", str(base), "--force-overwrite", "true", "--trace=cuda",
-             "--sample=none", "--cpuctxsw=none"] + cmd)
-    line = next((l for l in p.stdout.splitlines() if l.startswith("{")), None)
-    if line is None:
-        raise SystemExit("gpu_profile: the traced run printed no JSON")
-    j = json.loads(line)
+             "--sample=none", "--cpuctxsw=none"] + graph + cmd)
+    if llama:
+        text = p.stdout + p.stderr
+        devices = re.findall(r"layer\s+\d+ assigned to device (\w+)", text)
+        if not devices or any(not d.startswith("CUDA") for d in devices):
+            raise SystemExit(f"gpu_profile: llama.cpp did not put every layer on the GPU: {sorted(set(devices))}")
+        n_layers = len(devices) - 1  # the output layer is listed too
+        m = re.search(r"total time: ([0-9.]+)ms, time per step: ([0-9.]+)ms", text)
+        if not m:
+            raise SystemExit("gpu_profile: llama.cpp printed no timing line")
+        # One forward pass per diffusion step; llama.cpp reports no separate forward time.
+        j = dict(forward_passes=args.steps, forward_ms=None, ms_per_step=float(m.group(2)),
+                 prompt_tokens=None, gen_length=None)
+    else:
+        line = next((l for l in p.stdout.splitlines() if l.startswith("{")), None)
+        if line is None:
+            raise SystemExit("gpu_profile: the traced run printed no JSON")
+        j = json.loads(line)
     forwards = j["forward_passes"]
     if forwards <= 0:
         raise SystemExit("gpu_profile: the run made no forward pass")
@@ -111,7 +158,7 @@ def main() -> int:
     gemm_shapes: dict[str, dict] = {}
     for r in rows(kern):
         name = r["Name"]
-        g = group_of(name)
+        g = group_of(name, LLAMA_GROUPS if llama else GROUPS)
         ns = float(r["Total Time (ns)"])
         n = int(r["Instances"])
         med = float(r["Med (ns)"]) * n
@@ -134,14 +181,28 @@ def main() -> int:
     for r in rows(mem):
         copies[r["Operation"].strip('"[]')] = dict(
             ms_total=float(r["Total Time (ns)"]) / 1e6, count=int(r["Count"]))
+    if llama:
+        # The forward count is assumed, not reported: attention runs once per
+        # layer, so check it ran layers x steps times, or every per-forward
+        # figure would be off.
+        att = groups.get("attention", {}).get("launches_per_forward", 0)
+        if abs(att - n_layers) > 1e-9:
+            raise SystemExit(f"gpu_profile: {att} attention launches per forward, expected {n_layers}; "
+                             f"the trace is not {forwards} forward passes")
     kernel_ms = sum(e["ms_per_forward"] for e in groups.values())
-    version = run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"]).stdout.strip()
-    dirty = bool(run(["git", "-C", str(root), "status", "--porcelain", "--", "src"]).stdout.strip())
+    if llama:
+        lroot = args.llama_cpp
+        versions = {"llama.cpp": run(["git", "-C", lroot, "rev-parse", "--short", "HEAD"]).stdout.strip()}
+    else:
+        version = run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"]).stdout.strip()
+        dirty = bool(run(["git", "-C", str(root), "status", "--porcelain", "--", "src"]).stdout.strip())
+        versions = {"mojo-dllm": version + ("-dirty" if dirty else "")}
     gpu = run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"]).stdout.strip()
     doc = dict(
         date=dt.datetime.now().isoformat(timespec="seconds"), label=args.label,
-        versions={"mojo-dllm": version + ("-dirty" if dirty else "")}, gpu=gpu,
-        model=pathlib.Path(args.model).name, seq_len=j["prompt_tokens"] + j["gen_length"],
+        runtime=args.runtime, versions=versions, gpu=gpu,
+        model=pathlib.Path(args.model).name,
+        seq_len=args.seq_len if llama else j["prompt_tokens"] + j["gen_length"],
         steps=args.steps, forward_passes=forwards,
         forward_ms_measured=j["forward_ms"], ms_per_step_measured=j["ms_per_step"],
         kernel_ms_per_forward=round(kernel_ms, 3),

@@ -70,8 +70,10 @@ boundary and the kernels can load 32-bit words.
 
 **Activations get one scale per 32.** The GPU quantizes activations to int8
 with one f32 scale per 32 values (llama.cpp's Q8_1 shape) and keeps
-`scale x sum(q)` next to it. A 32-weight Q4_K sub-block then meets exactly
-one activation scale:
+`scale x sum(q)` next to it. One warp quantizes one 32-value block, a value
+per lane, and reduces its max and integer sum with shuffles, so loads and
+stores are coalesced. A 32-weight Q4_K sub-block then meets exactly one
+activation scale:
 
 ```text
 sum w x = d*sc*dx * sum(q * qx)  -  dmin*m * (dx * sum(qx))

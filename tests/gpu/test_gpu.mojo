@@ -239,6 +239,47 @@ def test_mma_k16_fragment_layout() raises:
     _check_mma(16)
 
 
+def _check_quantize(n_tokens: Int, K: Int) raises:
+    """GPU activation quantization against the formula, bit for bit."""
+    var ctx = DeviceContext()
+    var x = Floats(n_tokens * K)
+    _fill(x, 21)
+    # One all-zero block: its scale must be 0 and its values 0, not NaN.
+    for i in range(32):
+        x[32 + i] = 0
+    var qa = GpuQActs(ctx, n_tokens, K)
+    var dx = _up(ctx, x)
+    quantize_gpu(ctx, dev_f32(dx), n_tokens, K, qa)
+    var nb = n_tokens * K // 32
+    var q = Bytes(n_tokens * K)
+    ctx.enqueue_copy(q.i8(), qa.q.create_sub_buffer[DType.int8](0, q.size))
+    var d = _down(ctx, qa.d, nb)
+    var s = _down(ctx, qa.s, nb)
+    var qp = q.i8()
+    for b in range(nb):
+        var amax = Float32(0)
+        for i in range(32):
+            amax = max(amax, abs(x[b * 32 + i]))
+        var want_d = amax / 127.0
+        var inv = Float32(0) if amax == 0 else 127.0 / amax
+        var sum = 0
+        for i in range(32):
+            var v = Int(round(x[b * 32 + i] * inv))
+            assert_equal(
+                Int(qp[unsafe_offset=b * 32 + i]),
+                v,
+                "q block " + String(b) + " lane " + String(i),
+            )
+            sum += v
+        assert_equal(d[b], want_d, "scale of block " + String(b))
+        assert_equal(s[b], want_d * Float32(sum), "sum of block " + String(b))
+
+
+def test_quantize_matches_formula() raises:
+    _check_quantize(1, 256)
+    _check_quantize(37, 512)
+
+
 def _check_gemm(name: String, n_tokens: Int) raises:
     """GPU int8 GEMM against an f32 GEMM over the reference dequantization."""
     var ctx = DeviceContext()

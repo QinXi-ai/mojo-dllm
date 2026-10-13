@@ -1,0 +1,111 @@
+{
+  "date": "2026-10-12T12:21:44",
+  "label": "quant-new-2",
+  "runtime": "mojo-dllm",
+  "versions": {
+    "mojo-dllm": "1e97ac7"
+  },
+  "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU, 595.84",
+  "model": "LLaDA-8B-Instruct.Q4_K_M.gguf",
+  "seq_len": 148,
+  "steps": 4,
+  "forward_passes": 4,
+  "forward_ms_measured": 374.9181965,
+  "ms_per_step_measured": 390.33355625,
+  "kernel_ms_per_forward": 368.481,
+  "kernel_median_ms_per_forward": 320.678,
+  "groups": {
+    "gemm_q4k": {
+      "ms_per_forward": 269.969,
+      "median_ms_per_forward": 243.919,
+      "launches_per_forward": 192.0
+    },
+    "gemm_q6k": {
+      "ms_per_forward": 55.216,
+      "median_ms_per_forward": 33.356,
+      "launches_per_forward": 33.0
+    },
+    "attention": {
+      "ms_per_forward": 22.492,
+      "median_ms_per_forward": 22.57,
+      "launches_per_forward": 32.0
+    },
+    "quantize": {
+      "ms_per_forward": 5.907,
+      "median_ms_per_forward": 5.932,
+      "launches_per_forward": 129.0
+    },
+    "silu_mul": {
+      "ms_per_forward": 5.456,
+      "median_ms_per_forward": 5.455,
+      "launches_per_forward": 32.0
+    },
+    "add": {
+      "ms_per_forward": 3.58,
+      "median_ms_per_forward": 3.575,
+      "launches_per_forward": 64.0
+    },
+    "rmsnorm": {
+      "ms_per_forward": 3.212,
+      "median_ms_per_forward": 3.206,
+      "launches_per_forward": 65.0
+    },
+    "rope": {
+      "ms_per_forward": 2.628,
+      "median_ms_per_forward": 2.643,
+      "launches_per_forward": 64.0
+    },
+    "copy_rows": {
+      "ms_per_forward": 0.021,
+      "median_ms_per_forward": 0.021,
+      "launches_per_forward": 2.0
+    }
+  },
+  "gemm_by_grid": {
+    "gemm_q4k grid 2 x 192 x 1": {
+      "ms_per_forward": 137.391,
+      "median_ms_per_forward": 137.932,
+      "launches_per_forward": 62.0
+    },
+    "gemm_q4k grid 2 x 64 x 1": {
+      "ms_per_forward": 131.232,
+      "median_ms_per_forward": 104.646,
+      "launches_per_forward": 128.0
+    },
+    "gemm_q6k grid 2 x 64 x 1": {
+      "ms_per_forward": 47.992,
+      "median_ms_per_forward": 26.154,
+      "launches_per_forward": 31.0
+    },
+    "gemm_q6k grid 1 x 1976 x 1": {
+      "ms_per_forward": 6.368,
+      "median_ms_per_forward": 6.349,
+      "launches_per_forward": 1.0
+    },
+    "gemm_q4k grid 1 x 192 x 1": {
+      "ms_per_forward": 1.345,
+      "median_ms_per_forward": 1.341,
+      "launches_per_forward": 2.0
+    },
+    "gemm_q6k grid 1 x 64 x 1": {
+      "ms_per_forward": 0.855,
+      "median_ms_per_forward": 0.854,
+      "launches_per_forward": 1.0
+    }
+  },
+  "copies": {
+    "CUDA memcpy HtoD": {
+      "ms_total": 894.355096,
+      "count": 300
+    },
+    "CUDA memcpy DtoH": {
+      "ms_total": 12.33395,
+      "count": 4
+    },
+    "CUDA memcpy DtoD": {
+      "ms_total": 0.080096,
+      "count": 8
+    }
+  },
+  "note": "Traced with nsys --trace=cuda (no stream synchronization). Kernel times are device time per forward pass; copies are totals for the run, weight upload included."
+}
