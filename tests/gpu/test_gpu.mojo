@@ -476,7 +476,9 @@ def test_window_after_full_pass_matches_full() raises:
     var all_rows = List[Int]()
     for i in range(len(toks)):
         all_rows.append(i)
-    var m = GpuDiffusionLM(FIX + "tiny-llada.gguf", max_tokens=16, kv_cache=True)
+    var m = GpuDiffusionLM(
+        FIX + "tiny-llada.gguf", max_tokens=16, kv_cache=True
+    )
     var full = Floats(len(toks) * 512)
     m.forward(toks, all_rows, full.ptr())
     var win = _window_rows()
@@ -487,7 +489,9 @@ def test_window_after_full_pass_matches_full() raises:
         for v in range(512):
             worst = max(
                 worst,
-                abs(Float64(part[j * 512 + v]) - Float64(full[win[j] * 512 + v])),
+                abs(
+                    Float64(part[j * 512 + v]) - Float64(full[win[j] * 512 + v])
+                ),
             )
     assert_true(worst < 1e-3, "window rows differ by " + String(worst))
 
