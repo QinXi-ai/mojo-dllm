@@ -75,5 +75,5 @@
       ]
     }
   },
-  "reading": "The scale epilogue costs about 40 ms and the tensor-core mma itself almost nothing; staging costs about 120 ms (activations about 67, weights about 59) and does not overlap with compute."
+  "reading": "Removing the scale epilogue saves about 40 ms and removing the mma 4 to 7 ms; removing staging saves about 120 ms (activations about 67, weights about 59). That staging is exposed rather than overlapped is an inference, not measured here."
 }
