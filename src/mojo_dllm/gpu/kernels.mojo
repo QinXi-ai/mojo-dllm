@@ -832,6 +832,119 @@ def _q4k_scale(h: SIMD[DType.int32, 4], j: Int) -> Tuple[Float32, Float32]:
     return (d * Float32(sc), -dmin * Float32(mn))
 
 
+comptime Q4K_WR = (BM4 * 9 + Q4K_THREADS - 1) // Q4K_THREADS
+"""16-byte weight chunks each thread stages per super-block."""
+
+
+@always_inline
+def _q4k_load(
+    w: U8Ptr, row_bytes: Int, r0: Int, n_rows: Int, b: Int, th: Int
+) -> Array[SIMD[DType.int32, 4], Q4K_WR]:
+    """This thread's 16-byte chunks of super-block b: header, then nibbles."""
+    var v = Array[SIMD[DType.int32, 4], Q4K_WR](fill=SIMD[DType.int32, 4](0))
+    comptime for rep in range(Q4K_WR):
+        var unit = th + rep * Q4K_THREADS
+        var row = unit // 9
+        if unit < BM4 * 9 and r0 + row < n_rows:
+            v[rep] = (
+                w.unsafe_offset(
+                    (r0 + row) * row_bytes + b * Q4K_BYTES + (unit % 9) * 16
+                )
+                .unsafe_bitcast[Int32]()
+                .unsafe_load[width=4, alignment=16]()
+            )
+    return v^
+
+
+@always_inline
+def _q4k_store(
+    v: Array[SIMD[DType.int32, 4], Q4K_WR],
+    sWq: SharedI32,
+    sWh: SharedI32,
+    th: Int,
+):
+    comptime for rep in range(Q4K_WR):
+        var unit = th + rep * Q4K_THREADS
+        if unit < BM4 * 9:
+            var row = unit // 9
+            var c = unit % 9
+            if c == 0:
+                sWh.unsafe_offset(row * 4).unsafe_store[alignment=16](v[rep])
+            else:
+                sWq.unsafe_offset(row * SWQ + (c - 1) * 4).unsafe_store[
+                    alignment=16
+                ](v[rep])
+
+
+@always_inline
+def _acts_load[
+    BN: Int, NTH: Int
+](aq: I8Ptr, k: Int, T: Int, t0: Int, b: Int, th: Int) -> Array[
+    SIMD[DType.int32, 4], (BN * 16 + NTH - 1) // NTH
+]:
+    """This thread's 16-byte chunks of BN tokens' activations, super-block b."""
+    comptime R = (BN * 16 + NTH - 1) // NTH
+    var v = Array[SIMD[DType.int32, 4], R](fill=SIMD[DType.int32, 4](0))
+    comptime for rep in range(R):
+        var unit = th + rep * NTH
+        var tok = unit >> 4
+        if unit < BN * 16 and t0 + tok < T:
+            v[rep] = (
+                aq.unsafe_offset((t0 + tok) * k + b * 256 + (unit & 15) * 16)
+                .unsafe_bitcast[Int32]()
+                .unsafe_load[width=4, alignment=16]()
+            )
+    return v^
+
+
+@always_inline
+def _acts_store[
+    BN: Int, NTH: Int
+](
+    v: Array[SIMD[DType.int32, 4], (BN * 16 + NTH - 1) // NTH],
+    sA: SharedI32,
+    th: Int,
+):
+    comptime for rep in range((BN * 16 + NTH - 1) // NTH):
+        var unit = th + rep * NTH
+        if unit < BN * 16:
+            sA.unsafe_offset((unit >> 4) * SW + (unit & 15) * 4).unsafe_store[
+                alignment=16
+            ](v[rep])
+
+
+@always_inline
+def _scales_load[
+    BN: Int, NTH: Int
+](ad: F32Ptr, as_: F32Ptr, k: Int, T: Int, t0: Int, b: Int, th: Int) -> Array[
+    Float32, 2 * ((BN * 8 + NTH - 1) // NTH)
+]:
+    """(d, s) of this thread's (token, sub-block) pairs, super-block b."""
+    comptime R = (BN * 8 + NTH - 1) // NTH
+    var v = Array[Float32, 2 * R](fill=0)
+    var nsub = k // QK
+    comptime for e in range(R):
+        var idx = th + e * NTH
+        var tk = idx >> 3
+        if idx < BN * 8 and t0 + tk < T:
+            var src = (t0 + tk) * nsub + b * 8 + (idx & 7)
+            v[2 * e] = ad[unsafe_offset=src]
+            v[2 * e + 1] = as_[unsafe_offset=src]
+    return v^
+
+
+@always_inline
+def _scales_store[
+    BN: Int, NTH: Int
+](v: Array[Float32, 2 * ((BN * 8 + NTH - 1) // NTH)], sAds: SharedF32, th: Int):
+    comptime for e in range((BN * 8 + NTH - 1) // NTH):
+        var idx = th + e * NTH
+        if idx < BN * 8:
+            var o = ((idx & 7) * BN + (idx >> 3)) * 2
+            sAds[unsafe_offset=o] = v[2 * e]
+            sAds[unsafe_offset=o + 1] = v[2 * e + 1]
+
+
 def _q4k_mma_kernel[
     BN: Int
 ](
@@ -881,30 +994,21 @@ def _q4k_mma_kernel[
     var acc = Array[Float32, 4 * NT8](fill=0)
     var ra = 16 * warp + g
     var rb = ra + 8
-    for b in range(k // 256):
-        # ---- stage: 9 chunks of 16 bytes per row (header, then 8 of nibbles)
-        comptime for rep in range((BM4 * 9 + Q4K_THREADS - 1) // Q4K_THREADS):
-            var unit = th + rep * Q4K_THREADS
-            if unit < BM4 * 9:
-                var row = unit // 9
-                var c = unit % 9
-                var v = SIMD[DType.int32, 4](0)
-                if r0 + row < n_rows:
-                    v = (
-                        w.unsafe_offset(
-                            (r0 + row) * row_bytes + b * Q4K_BYTES + c * 16
-                        )
-                        .unsafe_bitcast[Int32]()
-                        .unsafe_load[width=4, alignment=16]()
-                    )
-                if c == 0:
-                    sWh.unsafe_offset(row * 4).unsafe_store[alignment=16](v)
-                else:
-                    sWq.unsafe_offset(row * SWQ + (c - 1) * 4).unsafe_store[
-                        alignment=16
-                    ](v)
-        _stage_acts16[BN, Q4K_THREADS](aq, ad, as_, k, n_tok, t0, b, sA, sAds)
+    # Super-block b + 1 is read from global memory into registers while b
+    # runs on the tensor cores, so the loads overlap with compute.
+    var nb = k // 256
+    var wv = _q4k_load(w, row_bytes, r0, n_rows, 0, th)
+    var av = _acts_load[BN, Q4K_THREADS](aq, k, n_tok, t0, 0, th)
+    var dv = _scales_load[BN, Q4K_THREADS](ad, as_, k, n_tok, t0, 0, th)
+    for b in range(nb):
+        _q4k_store(wv, sWq, sWh, th)
+        _acts_store[BN, Q4K_THREADS](av, sA, th)
+        _scales_store[BN, Q4K_THREADS](dv, sAds, th)
         barrier()
+        if b + 1 < nb:
+            wv = _q4k_load(w, row_bytes, r0, n_rows, b + 1, th)
+            av = _acts_load[BN, Q4K_THREADS](aq, k, n_tok, t0, b + 1, th)
+            dv = _scales_load[BN, Q4K_THREADS](ad, as_, k, n_tok, t0, b + 1, th)
         # ---- tensor cores
         var ha = sWh.unsafe_offset(ra * 4).unsafe_load[width=4, alignment=16]()
         var hb = sWh.unsafe_offset(rb * 4).unsafe_load[width=4, alignment=16]()
