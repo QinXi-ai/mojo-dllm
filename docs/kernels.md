@@ -103,8 +103,14 @@ and 17 floats for the same reason.
 `tests/gpu/test_gpu.mojo` checks the fragment layout against a CPU matmul
 on random int8 matrices, and the whole kernel against an f64 GEMM.
 
-**Attention in tiles.** A block takes 16 queries of one head and walks the
-keys 32 at a time through shared memory, keeping a running maximum and sum
-(the online softmax of FlashAttention). K and V are read once per 16 queries,
-and the kernel never stores a score row, so the canvas length has no fixed
-limit.
+**Attention on f16 tensor cores.** Each warp owns 16 queries and walks the
+keys 32 at a time. Q is scaled by 1/sqrt(d) and held in registers as f16
+fragments; K is staged row-major and V transposed, both as f16, so every
+operand load is one 32-bit word. `mma.m16n8k16` computes S = Q K^T in f32,
+the four threads that share a row reduce its max with two shuffles, and the
+online softmax rescales the running sums. S's accumulator for 16 keys has the
+same register layout as the A operand of the next mma, so P goes from S to
+P V without leaving the registers. On LLaDA-8B the logits stay as close to
+the f32 CPU path as with f32 attention
+(`bench/checks/2026-10-13-attention-f16-logits.json`). The kernel never
+stores a score row, so the canvas length has no fixed limit.
