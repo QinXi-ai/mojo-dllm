@@ -283,9 +283,7 @@ def _attention_kernel[
     var m1 = Float32.MIN
     var l0 = Float32(0)
     var l1 = Float32(0)
-    var acc = Array[SIMD[DType.float32, 4], DN](
-        fill=SIMD[DType.float32, 4](0)
-    )
+    var acc = Array[SIMD[DType.float32, 4], DN](fill=SIMD[DType.float32, 4](0))
     var kt = 0
     while kt < nk:
         barrier()
@@ -371,9 +369,7 @@ def _attention_kernel[
             var a2 = _h2(s[2 * c + 1][0], s[2 * c + 1][1])
             var a3 = _h2(s[2 * c + 1][2], s[2 * c + 1][3])
             comptime for dn in range(DN):
-                var vrow = sVt.unsafe_offset(
-                    (dn * 8 + g) * VS + c * 16 + 2 * t
-                )
+                var vrow = sVt.unsafe_offset((dn * 8 + g) * VS + c * 16 + 2 * t)
                 var b0 = vrow.unsafe_load[width=2, alignment=4]()
                 var b1 = vrow.unsafe_offset(8).unsafe_load[
                     width=2, alignment=4
@@ -414,11 +410,31 @@ def attention_gpu(
     var kvi = Int32(kv_heads)
     if head_dim == 128:
         ctx.enqueue_function[_attention_kernel[128]](
-            q, k, v, o, Li, Li, hi, kvi, scale, grid_dim=grid, block_dim=ATT_THREADS
+            q,
+            k,
+            v,
+            o,
+            Li,
+            Li,
+            hi,
+            kvi,
+            scale,
+            grid_dim=grid,
+            block_dim=ATT_THREADS,
         )
     elif head_dim == 64:
         ctx.enqueue_function[_attention_kernel[64]](
-            q, k, v, o, Li, Li, hi, kvi, scale, grid_dim=grid, block_dim=ATT_THREADS
+            q,
+            k,
+            v,
+            o,
+            Li,
+            Li,
+            hi,
+            kvi,
+            scale,
+            grid_dim=grid,
+            block_dim=ATT_THREADS,
         )
     else:
         raise Error(
