@@ -1,0 +1,79 @@
+{
+  "date": "2026-10-13",
+  "model": "LLaDA-8B-Instruct.Q4_K_M.gguf",
+  "tokens": 148,
+  "reps_per_shape": 30,
+  "base_commit": "a88dfc9 kernels (GEMM unchanged since 5aaaaf0)",
+  "method": "bench/bench_gpu_gemm.mojo built against modified copies of the Q4_K kernel; Q6_K unchanged. GSM8K eval paused during each experiment; variants interleaved, two rounds each.",
+  "variants": {
+    "base": "the shipped kernel",
+    "noscale": "epilogue keeps only Float32(c): no scale loads or FMAs",
+    "intacc": "int32 accumulation only: no conversion, no scales",
+    "nomma": "intacc, with the mma replaced by an xor of its operands",
+    "nostage": "intacc, weights and activations staged only for the first super-block",
+    "onceA": "intacc, activations staged once",
+    "onceW": "intacc, weights staged once",
+    "v3": "perf-gemm3: Q4_K packed nibbles in shared memory, 128 rows and 8 warps per block (Q6_K unchanged)"
+  },
+  "gemm_ms_per_forward": {
+    "out": {
+      "base": [
+        259.1,
+        259.4
+      ],
+      "intacc": [
+        225.4,
+        219.3
+      ],
+      "noscale": [
+        214.3,
+        218.4
+      ]
+    },
+    "out2": {
+      "base": [
+        262.5,
+        257.6
+      ],
+      "intacc": [
+        225.3,
+        219.3
+      ],
+      "nomma": [
+        218.1,
+        215.5
+      ],
+      "nostage": [
+        102.8,
+        101.0
+      ]
+    },
+    "out3": {
+      "intacc": [
+        220.3,
+        219.9
+      ],
+      "onceA": [
+        152.5,
+        153.2
+      ],
+      "onceW": [
+        160.2,
+        161.4
+      ]
+    },
+    "v3_vs_base": {
+      "base": [
+        258.9,
+        258.2,
+        258.1
+      ],
+      "v3": [
+        215.5,
+        214.8,
+        215.0
+      ]
+    }
+  },
+  "reading": "The scale epilogue costs about 40 ms and the tensor-core mma itself almost nothing; staging costs about 120 ms (activations about 67, weights about 59) and does not overlap with compute."
+}
