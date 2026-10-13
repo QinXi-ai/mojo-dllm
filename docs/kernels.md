@@ -91,17 +91,15 @@ The int32 result goes to f32 with the two scales and, for Q4_K, the min term.
 the GEMM time and did not overlap with compute
 (`bench/checks/2026-10-13-gemm-cost-split.json`: with staging done once, the
 GEMM took about 100 ms instead of about 220; the mma itself cost almost
-nothing). So a
-Q4_K block copies each row's 144-byte super-block as it is, in 16-byte
-loads: the 16-byte header (d, dmin and the packed scales) to one array, the
-128 bytes of nibbles to another. A warp unpacks its A fragments in
+nothing). So a Q4_K block copies each row's 144-byte super-block as it is, in
+16-byte loads: the 16-byte header (d, dmin and the packed scales) to one
+array, the 128 bytes of nibbles to another. A warp unpacks its A fragments in
 registers: word i of nibble pair p holds sub-block 2p in its low nibbles and
 2p + 1 in its high ones at the same position, so one shared load feeds two
-mmas, and the 6-bit scales are decoded from the header per sub-block. With
-the weights packed, a block holds 128 rows and runs 8 warps in the same
-48 KiB, which halves the activation copies per output. The arithmetic is
-unchanged, so the logits are too
-(`bench/checks/2026-10-13-gemm3-logits.json`).
+mmas, and the 6-bit scales are decoded from the header per sub-block. With the
+weights packed, a block holds 128 rows and runs 8 warps in the same 48 KiB,
+which halves the activation copies per output. The arithmetic is unchanged, so
+the logits are too (`bench/checks/2026-10-13-gemm3-logits.json`).
 
 **Tile width per call.** Unpacking a weight tile costs the same however
 many tokens then use it, so the widest tile that saves a tile wins: a
