@@ -134,12 +134,12 @@ def test_rope_neox_matches_cpu() raises:
     _check_rope(True)
 
 
-def test_attention_gqa_matches_cpu() raises:
+def _check_attention(L: Int, hd: Int) raises:
+    # The GPU kernel multiplies in f16 (f32 accumulation), so it matches the
+    # f32 CPU kernel to f16 rounding, not to 1e-4.
     var ctx = DeviceContext()
-    var L = 37
     var heads = 4
     var kvh = 2
-    var hd = 128
     var q = Floats(L * heads * hd)
     var k = Floats(L * kvh * hd)
     var v = Floats(L * kvh * hd)
@@ -166,9 +166,30 @@ def test_attention_gqa_matches_cpu() raises:
         hd,
     )
     var got = _down(ctx, do_, want.n)
+    var rel = _rel(got, want)
+    print("attention L", L, "head_dim", hd, "relative error", rel)
     assert_true(
-        _max_abs(got, want) < 1e-4, "attention " + String(_max_abs(got, want))
+        rel < 2e-3,
+        "attention L="
+        + String(L)
+        + " hd="
+        + String(hd)
+        + " rel "
+        + String(rel),
     )
+
+
+def test_attention_gqa_matches_cpu() raises:
+    _check_attention(37, 128)
+
+
+def test_attention_head_dim_64_matches_cpu() raises:
+    _check_attention(37, 64)
+
+
+def test_attention_many_tiles_matches_cpu() raises:
+    # 150 queries: three query blocks, the last ragged; five key tiles.
+    _check_attention(150, 128)
 
 
 def test_elementwise_ops_match_cpu() raises:
