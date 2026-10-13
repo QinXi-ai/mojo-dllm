@@ -209,7 +209,7 @@ def _mma_f16(
 ) -> SIMD[DType.float32, 4]:
     """c + A B for one m16n8k16 tile: f16 inputs, f32 accumulation."""
     var r = llvm_intrinsic[
-        "llvm.nvvm.mma.m16n8k16.row.col.f32.f16",
+        "llvm.nvvm.mma.m16n8k16.row.col.f32.f32",
         _RegisterPackType[Float32, Float32, Float32, Float32],
     ](a0, a1, a2, a3, b0, b1, c[0], c[1], c[2], c[3])
     return SIMD[DType.float32, 4](r[0], r[1], r[2], r[3])
