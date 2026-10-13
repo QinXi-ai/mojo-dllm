@@ -151,8 +151,8 @@ flags.
 - **Int8 tensor cores on the GPU.** With `--device gpu`, every projection
   reads the same Q4_K and Q6_K blocks from GPU memory and multiplies them on
   the tensor cores: one `mma` per 32-weight Q4_K sub-block, one per 16-weight
-  Q6_K group. Attention gives each
-  thread block 16 queries and streams the keys through shared memory.
+  Q6_K group. Attention runs on the f16 tensor cores: each warp takes 16
+  queries and streams the keys through shared memory with an online softmax.
   [The GPU path](docs/kernels.md#the-gpu-path) has the details.
 - **Stop when the answer is final.** Steps only fill masked positions, so
   once an end-of-text token follows a fully committed answer, no later step

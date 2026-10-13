@@ -25,6 +25,7 @@ from max.gpu.host import DeviceBuffer, DeviceContext
 from max.gpu.primitives.warp import (
     max as warp_max,
     shuffle_idx,
+    shuffle_xor,
     sum as warp_sum,
 )
 
@@ -183,10 +184,40 @@ def rope_gpu(
 
 # ---------------------------------------------------------------- attention
 
-comptime QT = 16
-"""Queries per attention block; they share every K/V tile the block loads."""
-comptime KT = 32
-"""Keys per shared-memory tile: one per lane when scoring."""
+comptime AQ = 64
+"""Queries per attention block: 16 per warp, 4 warps."""
+comptime AK = 32
+"""Keys per shared-memory tile."""
+comptime ATT_THREADS = 128
+comptime KPAD = 8
+"""Halves of padding per shared K row, so the 8 rows a fragment load reads
+start 4 banks apart."""
+comptime VPAD = 8
+"""Halves of padding per shared transposed-V row, for the same reason."""
+comptime H2 = SIMD[DType.float16, 2]
+
+
+@always_inline
+def _mma_f16(
+    a0: H2,
+    a1: H2,
+    a2: H2,
+    a3: H2,
+    b0: H2,
+    b1: H2,
+    c: SIMD[DType.float32, 4],
+) -> SIMD[DType.float32, 4]:
+    """c + A B for one m16n8k16 tile: f16 inputs, f32 accumulation."""
+    var r = llvm_intrinsic[
+        "llvm.nvvm.mma.m16n8k16.row.col.f32.f32",
+        _RegisterPackType[Float32, Float32, Float32, Float32],
+    ](a0, a1, a2, a3, b0, b1, c[0], c[1], c[2], c[3])
+    return SIMD[DType.float32, 4](r[0], r[1], r[2], r[3])
+
+
+@always_inline
+def _h2(x: Float32, y: Float32) -> H2:
+    return H2(x.cast[DType.float16](), y.cast[DType.float16]())
 
 
 def _attention_kernel[
@@ -197,93 +228,168 @@ def _attention_kernel[
     v: F32Ptr,
     o: F32Ptr,
     L: Int32,
+    Lk: Int32,
     heads: Int32,
     kv_heads: Int32,
     scale: Float32,
 ):
-    """Flash-style attention: QT queries of one head walk the keys a tile at a
-    time with an online softmax, so K and V are read once per QT queries and
-    no score row is ever stored.
+    """Flash attention on the f16 tensor cores, f32 accumulation.
 
-    Warp w owns queries 2w and 2w+1 of the tile. Scoring puts key j on lane j;
-    the weighted sum puts output dimensions lane + 32i on lane.
+    Warp w owns queries 16w..16w+15 of the block's AQ. Per tile of AK keys it
+    computes S = Q K^T with m16n8k16 mmas, folds S into an online softmax,
+    and adds P V with more mmas. The S accumulators of keys 16c..16c+15 are
+    laid out exactly as the A operand of the P V mma, so P never leaves the
+    registers. Thread (g, t) of a warp holds rows g and g + 8 of its tile.
     """
-    comptime DL = HD // 32
-    var sQ = unsafe_stack_allocation[
-        QT * HD, Float32, address_space=AddressSpace.SHARED
-    ]()
-    # K rows padded to HD + 1 floats, so lane j reading row j hits bank j.
+    comptime KC = HD // 16
+    """k16 chunks of the head dimension (S = Q K^T)."""
+    comptime DN = HD // 8
+    """n8 tiles of the head dimension (O = P V)."""
+    comptime SN = AK // 8
+    """n8 tiles of keys in S."""
+    comptime KS = HD + KPAD
+    comptime VS = AK + VPAD
     var sK = unsafe_stack_allocation[
-        KT * (HD + 1), Float32, address_space=AddressSpace.SHARED
+        AK * KS, Float16, alignment=16, address_space=AddressSpace.SHARED
     ]()
-    var sV = unsafe_stack_allocation[
-        KT * HD, Float32, address_space=AddressSpace.SHARED
+    var sVt = unsafe_stack_allocation[
+        HD * VS, Float16, alignment=16, address_space=AddressSpace.SHARED
     ]()
-    var n = Int(L)
+    var nq = Int(L)
+    var nk = Int(Lk)
     var h = Int(block_idx.y)
-    var q0 = Int(block_idx.x) * QT
     var kvh = h // (Int(heads) // Int(kv_heads))
     var stride = Int(heads) * HD
     var kv_stride = Int(kv_heads) * HD
     var th = Int(thread_idx.x)
     var lane = Int(lane_id())
     var warp = Int(warp_id())
-    comptime for i in range(QT * HD // NT):
-        var idx = th + i * NT
-        var qi = idx // HD
-        var val = Float32(0)
-        if q0 + qi < n:
-            val = q[unsafe_offset=(q0 + qi) * stride + h * HD + idx % HD]
-        sQ[unsafe_offset=idx] = val
-    var m = SIMD[DType.float32, 2](Float32.MIN)
-    var l = SIMD[DType.float32, 2](0)
-    var acc = SIMD[DType.float32, 2 * DL](0)
+    var g = lane >> 2
+    var t = lane & 3
+    var r0 = Int(block_idx.x) * AQ + 16 * warp + g
+    var r1 = r0 + 8
+    # Q fragments for the whole head dimension, scaled, kept in registers.
+    var qa = Array[H2, 4 * KC](fill=H2(0))
+    comptime for c in range(KC):
+        comptime for e in range(4):
+            var r = r0 if (e & 1) == 0 else r1
+            var col = c * 16 + 2 * t + (8 if e >= 2 else 0)
+            if r < nq:
+                var src = q.unsafe_offset(r * stride + h * HD + col)
+                qa[c * 4 + e] = _h2(
+                    src[unsafe_offset=0] * scale, src[unsafe_offset=1] * scale
+                )
+    var m0 = Float32.MIN
+    var m1 = Float32.MIN
+    var l0 = Float32(0)
+    var l1 = Float32(0)
+    var acc = Array[SIMD[DType.float32, 4], DN](fill=SIMD[DType.float32, 4](0))
     var kt = 0
-    while kt < n:
+    while kt < nk:
         barrier()
-        comptime for i in range(KT * HD // NT):
-            var idx = th + i * NT
+        # Stage AK keys: K row-major, V transposed, both as f16.
+        comptime for i in range(AK * HD // ATT_THREADS):
+            var idx = th + i * ATT_THREADS
             var j = idx // HD
             var d = idx % HD
             var kv_ = Float32(0)
             var vv = Float32(0)
-            if kt + j < n:
+            if kt + j < nk:
                 var src = (kt + j) * kv_stride + kvh * HD + d
                 kv_ = k[unsafe_offset=src]
                 vv = v[unsafe_offset=src]
-            sK[unsafe_offset=j * (HD + 1) + d] = kv_
-            sV[unsafe_offset=idx] = vv
+            sK[unsafe_offset=j * KS + d] = kv_.cast[DType.float16]()
+            sVt[unsafe_offset=d * VS + j] = vv.cast[DType.float16]()
         barrier()
-        var valid = kt + lane < n
-        comptime for e in range(2):
-            var qrow = sQ.unsafe_offset((2 * warp + e) * HD)
-            var krow = sK.unsafe_offset(lane * (HD + 1))
-            var s = Float32(0)
-            for d in range(HD):
-                s += qrow[unsafe_offset=d] * krow[unsafe_offset=d]
-            s = s * scale if valid else Float32.MIN
-            var m_new = max(m[e], warp_max(s))
-            var p = exp(s - m_new) if valid else Float32(0)
-            var corr = exp(m[e] - m_new)
-            l[e] = l[e] * corr + warp_sum(p)
-            m[e] = m_new
-            comptime for i in range(DL):
-                acc[e * DL + i] *= corr
-            for jj in range(KT):
-                var pj = shuffle_idx(p, UInt32(jj))
-                comptime for i in range(DL):
-                    acc[e * DL + i] += (
-                        pj * sV[unsafe_offset=jj * HD + lane + 32 * i]
-                    )
-        kt += KT
-    comptime for e in range(2):
-        var qi = q0 + 2 * warp + e
-        if qi < n:
-            var inv = 1.0 / l[e]
-            comptime for i in range(DL):
-                o[unsafe_offset=qi * stride + h * HD + lane + 32 * i] = (
-                    acc[e * DL + i] * inv
+        # S = Q K^T for this warp's 16 queries and AK keys.
+        var s = Array[SIMD[DType.float32, 4], SN](
+            fill=SIMD[DType.float32, 4](0)
+        )
+        comptime for n in range(SN):
+            var krow = sK.unsafe_offset((n * 8 + g) * KS + 2 * t)
+            comptime for c in range(KC):
+                var b0 = krow.unsafe_offset(c * 16).unsafe_load[
+                    width=2, alignment=4
+                ]()
+                var b1 = krow.unsafe_offset(c * 16 + 8).unsafe_load[
+                    width=2, alignment=4
+                ]()
+                s[n] = _mma_f16(
+                    qa[c * 4],
+                    qa[c * 4 + 1],
+                    qa[c * 4 + 2],
+                    qa[c * 4 + 3],
+                    b0,
+                    b1,
+                    s[n],
                 )
+        # Online softmax over rows g (lanes 0, 1 of s[n]) and g + 8 (2, 3).
+        var t0 = Float32.MIN
+        var t1 = Float32.MIN
+        comptime for n in range(SN):
+            var sn = s[n]
+            comptime for e in range(4):
+                if kt + n * 8 + 2 * t + (e & 1) >= nk:
+                    sn[e] = Float32.MIN
+            s[n] = sn
+            t0 = max(t0, max(sn[0], sn[1]))
+            t1 = max(t1, max(sn[2], sn[3]))
+        # The four threads of a quad hold one row between them.
+        t0 = max(t0, shuffle_xor(t0, 1))
+        t0 = max(t0, shuffle_xor(t0, 2))
+        t1 = max(t1, shuffle_xor(t1, 1))
+        t1 = max(t1, shuffle_xor(t1, 2))
+        var n0 = max(m0, t0)
+        var n1 = max(m1, t1)
+        var c0 = exp(m0 - n0)
+        var c1 = exp(m1 - n1)
+        m0 = n0
+        m1 = n1
+        var ps0 = Float32(0)
+        var ps1 = Float32(0)
+        comptime for n in range(SN):
+            var sn = s[n]
+            comptime for e in range(4):
+                var valid = kt + n * 8 + 2 * t + (e & 1) < nk
+                var mrow = m0 if e < 2 else m1
+                sn[e] = exp(sn[e] - mrow) if valid else Float32(0)
+            s[n] = sn
+            ps0 += sn[0] + sn[1]
+            ps1 += sn[2] + sn[3]
+        # l is a per-thread partial sum; the quad adds them up at the end.
+        l0 = l0 * c0 + ps0
+        l1 = l1 * c1 + ps1
+        var corr = SIMD[DType.float32, 4](c0, c0, c1, c1)
+        comptime for dn in range(DN):
+            acc[dn] = acc[dn] * corr
+        # O += P V: S's accumulators for keys 16c..16c+15 are P's A operand.
+        comptime for c in range(AK // 16):
+            var a0 = _h2(s[2 * c][0], s[2 * c][1])
+            var a1 = _h2(s[2 * c][2], s[2 * c][3])
+            var a2 = _h2(s[2 * c + 1][0], s[2 * c + 1][1])
+            var a3 = _h2(s[2 * c + 1][2], s[2 * c + 1][3])
+            comptime for dn in range(DN):
+                var vrow = sVt.unsafe_offset((dn * 8 + g) * VS + c * 16 + 2 * t)
+                var b0 = vrow.unsafe_load[width=2, alignment=4]()
+                var b1 = vrow.unsafe_offset(8).unsafe_load[
+                    width=2, alignment=4
+                ]()
+                acc[dn] = _mma_f16(a0, a1, a2, a3, b0, b1, acc[dn])
+        kt += AK
+    l0 += shuffle_xor(l0, 1)
+    l0 += shuffle_xor(l0, 2)
+    l1 += shuffle_xor(l1, 1)
+    l1 += shuffle_xor(l1, 2)
+    var inv0 = 1.0 / l0
+    var inv1 = 1.0 / l1
+    comptime for dn in range(DN):
+        var col = h * HD + dn * 8 + 2 * t
+        if r0 < nq:
+            o[unsafe_offset=r0 * stride + col] = acc[dn][0] * inv0
+            o[unsafe_offset=r0 * stride + col + 1] = acc[dn][1] * inv0
+        if r1 < nq:
+            o[unsafe_offset=r1 * stride + col] = acc[dn][2] * inv1
+            o[unsafe_offset=r1 * stride + col + 1] = acc[dn][3] * inv1
 
 
 def attention_gpu(
@@ -298,17 +404,37 @@ def attention_gpu(
     head_dim: Int,
 ) raises:
     var scale = Float32(1.0 / sqrt(Float64(head_dim)))
-    var grid = (_cdiv(L, QT), heads)
+    var grid = (_cdiv(L, AQ), heads)
     var Li = Int32(L)
     var hi = Int32(heads)
     var kvi = Int32(kv_heads)
     if head_dim == 128:
         ctx.enqueue_function[_attention_kernel[128]](
-            q, k, v, o, Li, hi, kvi, scale, grid_dim=grid, block_dim=NT
+            q,
+            k,
+            v,
+            o,
+            Li,
+            Li,
+            hi,
+            kvi,
+            scale,
+            grid_dim=grid,
+            block_dim=ATT_THREADS,
         )
     elif head_dim == 64:
         ctx.enqueue_function[_attention_kernel[64]](
-            q, k, v, o, Li, hi, kvi, scale, grid_dim=grid, block_dim=NT
+            q,
+            k,
+            v,
+            o,
+            Li,
+            Li,
+            hi,
+            kvi,
+            scale,
+            grid_dim=grid,
+            block_dim=ATT_THREADS,
         )
     else:
         raise Error(

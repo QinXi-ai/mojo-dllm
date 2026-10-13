@@ -32,6 +32,14 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Changed
 
+- GPU attention runs on the f16 tensor cores (`mma.m16n8k16`, f32
+  accumulation): each warp takes 16 queries, and P goes from the score mma to
+  the P V mma without leaving the registers. LLaDA-8B at 148 tokens:
+  attention 17.2 to 8.5 ms per forward in interleaved traces
+  (`bench/profiles/2026-10-13-attn-*`). Logits stay as close to the f32 CPU
+  path as with f32 attention (`bench/checks/2026-10-13-attention-f16-logits.json`).
+- `scripts/compare_logits.py` compares two builds' GPU logits on a real model
+  against the f32 CPU path, for kernel changes that are not exact.
 - GPU activation quantization runs one warp per 32-value block instead of
   one thread, with the same output bit for bit. LLaDA-8B at 148 tokens:
   quantization 30.5 to 5.9 ms per forward, measured forward 397-401 to

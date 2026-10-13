@@ -134,12 +134,12 @@ def test_rope_neox_matches_cpu() raises:
     _check_rope(True)
 
 
-def test_attention_gqa_matches_cpu() raises:
+def _check_attention(L: Int, hd: Int) raises:
+    # The GPU kernel multiplies in f16 (f32 accumulation), so it matches the
+    # f32 CPU kernel to f16 rounding, not to 1e-4.
     var ctx = DeviceContext()
-    var L = 37
     var heads = 4
     var kvh = 2
-    var hd = 128
     var q = Floats(L * heads * hd)
     var k = Floats(L * kvh * hd)
     var v = Floats(L * kvh * hd)
@@ -166,9 +166,30 @@ def test_attention_gqa_matches_cpu() raises:
         hd,
     )
     var got = _down(ctx, do_, want.n)
+    var rel = _rel(got, want)
+    print("attention L", L, "head_dim", hd, "relative error", rel)
     assert_true(
-        _max_abs(got, want) < 1e-4, "attention " + String(_max_abs(got, want))
+        rel < 2e-3,
+        "attention L="
+        + String(L)
+        + " hd="
+        + String(hd)
+        + " rel "
+        + String(rel),
     )
+
+
+def test_attention_gqa_matches_cpu() raises:
+    _check_attention(37, 128)
+
+
+def test_attention_head_dim_64_matches_cpu() raises:
+    _check_attention(37, 64)
+
+
+def test_attention_many_tiles_matches_cpu() raises:
+    # 150 queries: three query blocks, the last ragged; five key tiles.
+    _check_attention(150, 128)
 
 
 def test_elementwise_ops_match_cpu() raises:
@@ -348,7 +369,7 @@ def test_tile_width_rule() raises:
     assert_equal(_pick_bn(380), 80)
 
 
-def _check_forward(path: String, vocab: Int) raises:
+def _check_forward(path: String, vocab: Int, bound: Float64) raises:
     # The canvas tests/fixtures/*.expected.f32 was computed for.
     var toks: List[Int] = [5, 17, 300, 511, 511, 42, 511, 7]
     var rows = List[Int]()
@@ -377,7 +398,7 @@ def _check_forward(path: String, vocab: Int) raises:
         _rel(got, want),
     )
     assert_true(
-        rel_gpu < 0.02, path + " relative logit error " + String(rel_gpu)
+        rel_gpu < bound, path + " relative logit error " + String(rel_gpu)
     )
     for r in range(len(toks)):
         var bg = 0
@@ -391,11 +412,16 @@ def _check_forward(path: String, vocab: Int) raises:
 
 
 def test_forward_llada_matches_cpu() raises:
-    _check_forward("tiny-llada.gguf", 512)
+    # Attention runs in f16 on the GPU. This random-weight fixture is more
+    # sensitive to f16 rounding of Q and K than a trained model: its error
+    # against the f32 reference went from 0.017 (f32 attention) to 0.036. On
+    # LLaDA-8B the f16 kernel tracks the CPU as closely as the f32 one did
+    # (bench/checks/2026-10-13-attention-f16-logits.json).
+    _check_forward("tiny-llada.gguf", 512, 0.05)
 
 
 def test_forward_dream_matches_cpu() raises:
-    _check_forward("tiny-dream.gguf", 512)
+    _check_forward("tiny-dream.gguf", 512, 0.02)
 
 
 def test_forward_subset_rows_match_full() raises:
