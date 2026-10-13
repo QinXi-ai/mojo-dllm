@@ -741,6 +741,97 @@ def _stage_acts[
             sAds[unsafe_offset=o + 1] = 0
 
 
+comptime BM4 = 128
+"""Weight rows per Q4_K thread block: 16 per warp, 8 warps."""
+comptime Q4K_THREADS = 256
+comptime SWQ = 36
+"""Shared row stride of the packed Q4_K nibbles in 32-bit words: 128 bytes
+plus 16 of padding, so the 8 rows a fragment load reads fall in different
+banks."""
+
+
+@always_inline
+def _stage_acts16[
+    BN: Int, NTH: Int
+](
+    aq: I8Ptr,
+    ad: F32Ptr,
+    as_: F32Ptr,
+    k: Int,
+    T: Int,
+    t0: Int,
+    b: Int,
+    sA: SharedI32,
+    sAds: SharedF32,
+):
+    """`_stage_acts` with 128-bit copies and NTH threads."""
+    var th = Int(thread_idx.x)
+    comptime for rep in range((BN * 16 + NTH - 1) // NTH):
+        var unit = th + rep * NTH
+        if unit < BN * 16:
+            var tok = unit >> 4
+            var c = unit & 15
+            var v = SIMD[DType.int32, 4](0)
+            if t0 + tok < T:
+                v = (
+                    aq.unsafe_offset((t0 + tok) * k + b * 256 + c * 16)
+                    .unsafe_bitcast[Int32]()
+                    .unsafe_load[width=4, alignment=16]()
+                )
+            sA.unsafe_offset(tok * SW + c * 4).unsafe_store[alignment=16](v)
+    var nsub = k // QK
+    comptime for e in range((BN * 8 + NTH - 1) // NTH):
+        var idx = th + e * NTH
+        if idx < BN * 8:
+            var tk = idx >> 3
+            var j = idx & 7
+            var o = (j * BN + tk) * 2
+            if t0 + tk < T:
+                sAds[unsafe_offset=o] = ad[
+                    unsafe_offset=(t0 + tk) * nsub + b * 8 + j
+                ]
+                sAds[unsafe_offset=o + 1] = as_[
+                    unsafe_offset=(t0 + tk) * nsub + b * 8 + j
+                ]
+            else:
+                sAds[unsafe_offset=o] = 0
+                sAds[unsafe_offset=o + 1] = 0
+
+
+@always_inline
+def _byte(w: Int32, i: Int) -> Int32:
+    return (w >> Int32(8 * i)) & 0xFF
+
+
+@always_inline
+def _sb(h: SIMD[DType.int32, 4], i: Int) -> Int32:
+    """Scale byte i (0..11) of a Q4_K header held as four words."""
+    return _byte(h[1 + i // 4], i % 4)
+
+
+@always_inline
+def _q4k_scale(h: SIMD[DType.int32, 4], j: Int) -> Tuple[Float32, Float32]:
+    """d * sc_j and -dmin * m_j of one Q4_K super-block from its 16-byte header.
+
+    Word 0 holds d and dmin as f16; words 1..3 hold the 12 packed scale bytes.
+    """
+    var d = bitcast[DType.float16](UInt16(Int(h[0]) & 0xFFFF)).cast[
+        DType.float32
+    ]()
+    var dmin = bitcast[DType.float16](UInt16((Int(h[0]) >> 16) & 0xFFFF)).cast[
+        DType.float32
+    ]()
+    var sc: Int32
+    var mn: Int32
+    if j < 4:
+        sc = _sb(h, j) & 63
+        mn = _sb(h, j + 4) & 63
+    else:
+        sc = (_sb(h, j + 4) & 0xF) | ((_sb(h, j - 4) >> 6) << 4)
+        mn = (_sb(h, j + 4) >> 4) | ((_sb(h, j) >> 6) << 4)
+    return (d * Float32(sc), -dmin * Float32(mn))
+
+
 def _q4k_mma_kernel[
     BN: Int
 ](
@@ -754,18 +845,23 @@ def _q4k_mma_kernel[
     dst: F32Ptr,
     ldo: Int32,
 ):
-    var sW = unsafe_stack_allocation[
-        BM * SW, Int32, address_space=AddressSpace.SHARED
+    """Q4_K GEMM: BM4 weight rows by BN tokens per block, 8 warps.
+
+    Staging is a plain 16-byte copy: each row's 128 bytes of packed nibbles
+    go to sWq as they are, and its 16-byte header (d, dmin, 12 scale bytes)
+    to sWh. A warp unpacks its A fragments in registers: packed word i of
+    pair p holds sub-block 2p in its low nibbles and 2p + 1 in its high
+    ones, at the same position, so one load feeds two mmas. The scale
+    arithmetic is the same as when the scales were unpacked during staging.
+    """
+    var sWq = unsafe_stack_allocation[
+        BM4 * SWQ, Int32, alignment=16, address_space=AddressSpace.SHARED
+    ]()
+    var sWh = unsafe_stack_allocation[
+        BM4 * 4, Int32, alignment=16, address_space=AddressSpace.SHARED
     ]()
     var sA = unsafe_stack_allocation[
-        BN * SW, Int32, address_space=AddressSpace.SHARED
-    ]()
-    # Row stride 9, not 8: rows g and g + 4 of a fragment would share banks.
-    var sWs = unsafe_stack_allocation[
-        BM * WS4, Float32, address_space=AddressSpace.SHARED
-    ]()
-    var sWm = unsafe_stack_allocation[
-        BM * WS4, Float32, address_space=AddressSpace.SHARED
+        BN * SW, Int32, alignment=16, address_space=AddressSpace.SHARED
     ]()
     var sAds = unsafe_stack_allocation[
         BN * 16, Float32, alignment=16, address_space=AddressSpace.SHARED
@@ -773,7 +869,7 @@ def _q4k_mma_kernel[
     var k = Int(K)
     var n_rows = Int(N)
     var n_tok = Int(T)
-    var r0 = Int(block_idx.y) * BM
+    var r0 = Int(block_idx.y) * BM4
     var t0 = Int(block_idx.x) * BN
     var th = Int(thread_idx.x)
     var lane = Int(lane_id())
@@ -781,85 +877,72 @@ def _q4k_mma_kernel[
     var g = lane >> 2
     var t = lane & 3
     var row_bytes = (k // 256) * Q4K_BYTES
-    # Staging role: two threads per weight row, each unpacking half a super-block.
-    var srow = th >> 1
-    var shalf = th & 1
     comptime NT8 = BN // 8
     var acc = Array[Float32, 4 * NT8](fill=0)
+    var ra = 16 * warp + g
+    var rb = ra + 8
     for b in range(k // 256):
-        # ---- stage weights
-        var wdst = sW.unsafe_offset(srow * SW)
-        if r0 + srow < n_rows:
-            var blk = w.unsafe_offset((r0 + srow) * row_bytes + b * Q4K_BYTES)
-            var d = _f16(blk, 0)
-            var dmin = _f16(blk, 2)
-            var scl = blk.unsafe_offset(4)
-            comptime for jj in range(4):
-                var j = 4 * shalf + jj
-                var sc: Int
-                var mn: Int
-                if j < 4:
-                    sc = Int(scl[unsafe_offset=j] & 63)
-                    mn = Int(scl[unsafe_offset=j + 4] & 63)
+        # ---- stage: 9 chunks of 16 bytes per row (header, then 8 of nibbles)
+        comptime for rep in range((BM4 * 9 + Q4K_THREADS - 1) // Q4K_THREADS):
+            var unit = th + rep * Q4K_THREADS
+            if unit < BM4 * 9:
+                var row = unit // 9
+                var c = unit % 9
+                var v = SIMD[DType.int32, 4](0)
+                if r0 + row < n_rows:
+                    v = (
+                        w.unsafe_offset(
+                            (r0 + row) * row_bytes + b * Q4K_BYTES + c * 16
+                        )
+                        .unsafe_bitcast[Int32]()
+                        .unsafe_load[width=4, alignment=16]()
+                    )
+                if c == 0:
+                    sWh.unsafe_offset(row * 4).unsafe_store[alignment=16](v)
                 else:
-                    sc = Int(
-                        (scl[unsafe_offset=j + 4] & 0xF)
-                        | ((scl[unsafe_offset=j - 4] >> 6) << 4)
-                    )
-                    mn = Int(
-                        (scl[unsafe_offset=j + 4] >> 4)
-                        | ((scl[unsafe_offset=j] >> 6) << 4)
-                    )
-                sWs[unsafe_offset=srow * WS4 + j] = d * Float32(sc)
-                # Stored negated, so the fold is two fused multiply-adds.
-                sWm[unsafe_offset=srow * WS4 + j] = -dmin * Float32(mn)
-            var qs = blk.unsafe_offset(16).unsafe_bitcast[Int32]()
-            comptime for pp in range(2):
-                var p = 2 * shalf + pp
-                comptime for i in range(8):
-                    var wd = qs[unsafe_offset=p * 8 + i]
-                    wdst[unsafe_offset=(2 * p) * 8 + i] = wd & 0x0F0F0F0F
-                    wdst[unsafe_offset=(2 * p + 1) * 8 + i] = (
-                        wd >> 4
-                    ) & 0x0F0F0F0F
-        else:
-            comptime for jj in range(4):
-                sWs[unsafe_offset=srow * WS4 + 4 * shalf + jj] = 0
-                sWm[unsafe_offset=srow * WS4 + 4 * shalf + jj] = 0
-            comptime for i in range(32):
-                wdst[unsafe_offset=shalf * 32 + i] = 0
-        _stage_acts[BN](aq, ad, as_, k, n_tok, t0, b, sA, sAds)
+                    sWq.unsafe_offset(row * SWQ + (c - 1) * 4).unsafe_store[
+                        alignment=16
+                    ](v)
+        _stage_acts16[BN, Q4K_THREADS](aq, ad, as_, k, n_tok, t0, b, sA, sAds)
         barrier()
         # ---- tensor cores
-        var ra = (16 * warp + g) * SW
-        var rb = (16 * warp + g + 8) * SW
-        comptime for j in range(8):
-            var a0 = sW[unsafe_offset=ra + j * 8 + t]
-            var a1 = sW[unsafe_offset=rb + j * 8 + t]
-            var a2 = sW[unsafe_offset=ra + j * 8 + 4 + t]
-            var a3 = sW[unsafe_offset=rb + j * 8 + 4 + t]
-            var ws0 = sWs[unsafe_offset=(16 * warp + g) * WS4 + j]
-            var ws1 = sWs[unsafe_offset=(16 * warp + g + 8) * WS4 + j]
-            var wm0 = sWm[unsafe_offset=(16 * warp + g) * WS4 + j]
-            var wm1 = sWm[unsafe_offset=(16 * warp + g + 8) * WS4 + j]
-            comptime for nt in range(NT8):
-                var bo = (nt * 8 + g) * SW + j * 8 + t
-                var c = _mma_k32(
-                    a0,
-                    a1,
-                    a2,
-                    a3,
-                    sA[unsafe_offset=bo],
-                    sA[unsafe_offset=bo + 4],
-                )
-                # (d, s) of tokens 2t and 2t + 1 in one 128-bit load.
-                var q = sAds.unsafe_offset(
-                    (j * BN + nt * 8 + 2 * t) * 2
-                ).unsafe_load[width=4, alignment=16]()
-                acc[nt * 4 + 0] += ws0 * q[0] * Float32(c[0]) + wm0 * q[1]
-                acc[nt * 4 + 1] += ws0 * q[2] * Float32(c[1]) + wm0 * q[3]
-                acc[nt * 4 + 2] += ws1 * q[0] * Float32(c[2]) + wm1 * q[1]
-                acc[nt * 4 + 3] += ws1 * q[2] * Float32(c[3]) + wm1 * q[3]
+        var ha = sWh.unsafe_offset(ra * 4).unsafe_load[width=4, alignment=16]()
+        var hb = sWh.unsafe_offset(rb * 4).unsafe_load[width=4, alignment=16]()
+        comptime for p in range(4):
+            var pa0 = sWq[unsafe_offset=ra * SWQ + p * 8 + t]
+            var pb0 = sWq[unsafe_offset=rb * SWQ + p * 8 + t]
+            var pa1 = sWq[unsafe_offset=ra * SWQ + p * 8 + 4 + t]
+            var pb1 = sWq[unsafe_offset=rb * SWQ + p * 8 + 4 + t]
+            comptime for hi in range(2):
+                comptime j = 2 * p + hi
+                var a0 = (pa0 >> Int32(4 * hi)) & 0x0F0F0F0F
+                var a1 = (pb0 >> Int32(4 * hi)) & 0x0F0F0F0F
+                var a2 = (pa1 >> Int32(4 * hi)) & 0x0F0F0F0F
+                var a3 = (pb1 >> Int32(4 * hi)) & 0x0F0F0F0F
+                var s0 = _q4k_scale(ha, j)
+                var s1 = _q4k_scale(hb, j)
+                var ws0 = s0[0]
+                var wm0 = s0[1]
+                var ws1 = s1[0]
+                var wm1 = s1[1]
+                comptime for nt in range(NT8):
+                    var bo = (nt * 8 + g) * SW + j * 8 + t
+                    var c = _mma_k32(
+                        a0,
+                        a1,
+                        a2,
+                        a3,
+                        sA[unsafe_offset=bo],
+                        sA[unsafe_offset=bo + 4],
+                    )
+                    # (d, s) of tokens 2t and 2t + 1 in one 128-bit load.
+                    var q = sAds.unsafe_offset(
+                        (j * BN + nt * 8 + 2 * t) * 2
+                    ).unsafe_load[width=4, alignment=16]()
+                    acc[nt * 4 + 0] += ws0 * q[0] * Float32(c[0]) + wm0 * q[1]
+                    acc[nt * 4 + 1] += ws0 * q[2] * Float32(c[1]) + wm0 * q[3]
+                    acc[nt * 4 + 2] += ws1 * q[0] * Float32(c[2]) + wm1 * q[1]
+                    acc[nt * 4 + 3] += ws1 * q[2] * Float32(c[3]) + wm1 * q[3]
         barrier()
     _store_tile[BN](acc, dst, Int(ldo), r0, t0, n_rows, n_tok, warp, g, t)
 
@@ -1069,7 +1152,6 @@ def _launch[
     dst: F32Ptr,
     ldo: Int,
 ) raises:
-    var grid = (_cdiv(n_tokens, BN), _cdiv(N, BM))
     if ggml_type == GGML_Q4_K:
         ctx.enqueue_function[_q4k_mma_kernel[BN]](
             w,
@@ -1081,8 +1163,8 @@ def _launch[
             Int32(n_tokens),
             dst,
             Int32(ldo),
-            grid_dim=grid,
-            block_dim=GEMM_THREADS,
+            grid_dim=(_cdiv(n_tokens, BN), _cdiv(N, BM4)),
+            block_dim=Q4K_THREADS,
         )
         return
     if ggml_type == GGML_Q6_K:
@@ -1096,7 +1178,7 @@ def _launch[
             Int32(n_tokens),
             dst,
             Int32(ldo),
-            grid_dim=grid,
+            grid_dim=(_cdiv(n_tokens, BN), _cdiv(N, BM)),
             block_dim=GEMM_THREADS,
         )
         return

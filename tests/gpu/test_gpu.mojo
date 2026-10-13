@@ -301,15 +301,18 @@ def test_quantize_matches_formula() raises:
     _check_quantize(37, 512)
 
 
-def _check_gemm(name: String, n_tokens: Int) raises:
+def _check_gemm(name: String, n_tokens: Int, rows: Int = 0) raises:
     """GPU int8 GEMM against an f32 GEMM over the reference dequantization."""
     var ctx = DeviceContext()
     var g = GGUFFile(FIX + "tiny-llada.gguf")
     var t = g.tensor(name)
     var K = t.ne0
-    var N = t.n_rows()
-    var staged = Bytes(staged_matrix_bytes(t.ggml_type, N, K))
-    stage_matrix(g.data_addr(t), t.ggml_type, N, K, staged.u8())
+    var all_rows = t.n_rows()
+    # rows > 0 multiplies only the first `rows` weight rows, to cover a last
+    # row tile that is partly outside the matrix.
+    var N = rows if rows > 0 else all_rows
+    var staged = Bytes(staged_matrix_bytes(t.ggml_type, all_rows, K))
+    stage_matrix(g.data_addr(t), t.ggml_type, all_rows, K, staged.u8())
     var dw = ctx.enqueue_create_buffer[DType.uint8](staged.size)
     ctx.enqueue_copy(dw, staged.u8())
     var x = Floats(n_tokens * K)
@@ -339,6 +342,11 @@ def test_gemm_q4k_ragged_tokens() raises:
 
 def test_gemm_q4k_many_tokens() raises:
     _check_gemm("blk.0.ffn_gate.weight", 37)
+
+
+def test_gemm_q4k_partial_row_tile() raises:
+    # 200 of 512 rows: the last row tile holds 72 rows, whatever its height.
+    _check_gemm("blk.0.ffn_gate.weight", 37, 200)
 
 
 def test_gemm_q6k_ragged_tokens() raises:
