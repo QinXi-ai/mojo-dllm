@@ -353,6 +353,11 @@ def test_gemm_q6k_ragged_tokens() raises:
     _check_gemm("blk.0.attn_v.weight", 5)
 
 
+def test_gemm_q6k_partial_row_tile() raises:
+    # 100 of the rows: the second 64-row tile holds 36 rows.
+    _check_gemm("blk.1.ffn_down.weight", 37, 100)
+
+
 def test_gemm_q6k_two_superblocks() raises:
     _check_gemm("blk.1.ffn_down.weight", 19)
 

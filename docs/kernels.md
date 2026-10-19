@@ -65,8 +65,8 @@ these tests; that mutation check runs before changes to this file land.
 with a layout chosen for tensor cores instead of AVX registers.
 
 **Weights stay in GGUF blocks.** Upload copies each Q4_K matrix as it is and
-pads each 210-byte Q6_K block to 212 bytes, so every block starts on a 4-byte
-boundary and the kernels can load 32-bit words.
+pads each 210-byte Q6_K block to 224 bytes, so every 16-byte chunk of a block
+is aligned and the kernels can load 16 bytes at a time.
 
 **Activations get one scale per 32.** The GPU quantizes activations to int8
 with one f32 scale per 32 values (llama.cpp's Q8_1 shape) and keeps
@@ -118,6 +118,16 @@ launch time times launches, middle value of three interleaved traces,
 logits match main on all 84 rows (`bench/checks/2026-10-13-gemm4-logits.json`).
 That the gain comes from overlapping the loads with compute is the reading
 the numbers fit; no hardware counters were collected to confirm it.
+
+**Q6_K: the same layout and prefetch.** The Q6_K kernel took the route the
+Q4_K one did. A block of 64 rows copies each row's 224 bytes (low nibbles,
+high bits, 16 int8 group scales, d) into shared memory as they are, in 16-byte
+loads; a warp rebuilds each 16-weight group's A fragment in registers
+(`_q6k_frag`: nibble, two high bits, minus 32 by an xor and a sign extension),
+and the next super-block waits in registers while the mma loop runs. Groups
+accumulate in the same order as before, so the result is unchanged. The
+padded block costs 14 bytes more per 210 than the raw block (about 40 MB on
+LLaDA-8B).
 
 **Tile width per call.** Unpacking a weight tile costs the same however
 many tokens then use it, so the widest tile that saves a tile wins: a
