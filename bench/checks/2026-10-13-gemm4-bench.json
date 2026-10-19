@@ -1,0 +1,11 @@
+{
+  "date": "2026-10-13",
+  "model": "LLaDA-8B-Instruct.Q4_K_M.gguf",
+  "tokens": 148,
+  "method": "bench/bench_gpu_gemm.mojo (30 reps per shape, Q4_K and Q6_K) built against main (56d0407, v3) and against 1d772c2 (v4); three interleaved rounds, the GSM8K eval paused for the run",
+  "gemm_ms_per_forward": {
+    "v3": [214.840798, 215.799008, 215.237822],
+    "v4": [150.698479, 150.611466, 150.775620]
+  },
+  "source": "scratch log run5.log of the session, values copied verbatim"
+}
