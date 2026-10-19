@@ -8,6 +8,13 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
+- Fused elementwise kernels on the GPU: the residual add, the RMSNorm and the
+  activation quantization run as one launch (three per layer boundary plus
+  the first norm), and `silu(g) * u` is quantized in the same launch as the
+  product. A layer goes from nine elementwise launches to four. Each fused
+  kernel evaluates the unfused kernels' f32 expressions in the same order, and
+  the GPU tests compare each against its chain bit for bit (issue #10); the
+  time saved is measured separately.
 - Greedy decoding scores each requested row on the GPU. One block per row
   reduces its logits to the first argmax, the maximum, the sum of
   exp(x - max), the runner-up logit and the sum of exp(x - max)(x - max); the

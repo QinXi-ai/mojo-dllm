@@ -688,18 +688,17 @@ struct GpuQActs(Movable):
         self.s = ctx.enqueue_create_buffer[DType.float32](max_tokens * K // QK)
 
 
-def _quantize_kernel(
-    x: F32Ptr, q: I8Ptr, ds: F32Ptr, ss: F32Ptr, n_blocks: Int32
+@always_inline
+def _quantize_lane(
+    v: Float32, q: I8Ptr, ds: F32Ptr, ss: F32Ptr, i: Int, b: Int
 ):
-    # One warp per 32-value block, one value per lane, so loads and stores
-    # are coalesced. max and an integer sum do not depend on the order of
-    # the reduction, so the result is the same as a sequential loop's.
-    # QK is 32, the warp width.
-    var b = Int(block_idx.x) * (NT // 32) + Int(warp_id())
-    if b >= Int(n_blocks):
-        return
-    var i = b * QK + Int(lane_id())
-    var v = x[unsafe_offset=i]
+    """Lane `lane_id()` of a warp quantizes value i of the 32-value block b.
+
+    All 32 lanes of the warp call it together: max and an integer sum do not
+    depend on the order of the reduction, so the result is the same as a
+    sequential loop's. The plain and the fused kernels share this code, which
+    is what keeps a fused kernel's output identical to the chain it replaces.
+    """
     var amax = warp_max(abs(v))
     var d = amax / 127.0
     var inv = Float32(0) if amax == 0 else 127.0 / amax
@@ -711,6 +710,18 @@ def _quantize_kernel(
         ss[unsafe_offset=b] = d * Float32(sum)
 
 
+def _quantize_kernel(
+    x: F32Ptr, q: I8Ptr, ds: F32Ptr, ss: F32Ptr, n_blocks: Int32
+):
+    # One warp per 32-value block, one value per lane, so loads and stores
+    # are coalesced. QK is 32, the warp width.
+    var b = Int(block_idx.x) * (NT // 32) + Int(warp_id())
+    if b >= Int(n_blocks):
+        return
+    var i = b * QK + Int(lane_id())
+    _quantize_lane(x[unsafe_offset=i], q, ds, ss, i, b)
+
+
 def quantize_gpu(
     ctx: DeviceContext, x: F32Ptr, n_tokens: Int, K: Int, qa: GpuQActs
 ) raises:
@@ -719,6 +730,184 @@ def quantize_gpu(
     var nb = n_tokens * K // QK
     ctx.enqueue_function[_quantize_kernel](
         x,
+        dev_i8(qa.q),
+        dev_f32(qa.d),
+        dev_f32(qa.s),
+        Int32(nb),
+        grid_dim=_cdiv(nb, NT // 32),
+        block_dim=NT,
+    )
+
+
+# ------------------------------------------------- fused elementwise kernels
+#
+# Each fused kernel evaluates the same f32 expressions, in the same order, as
+# the kernels it replaces, so its output matches the chain bit for bit
+# (tests/gpu/test_gpu.mojo compares them exactly).
+
+
+def _norm_quantize_pass(
+    row: F32Ptr,
+    w: F32Ptr,
+    inv: Float32,
+    q: I8Ptr,
+    ds: F32Ptr,
+    ss: F32Ptr,
+    d: Int,
+    row_off: Int,
+):
+    """Quantize row * inv * w. Thread t takes values t, t + NT, ...: a warp
+    holds 32 consecutive values at each step, which is one quantization block.
+    d is a multiple of 32, so a warp is either inside the row or outside it.
+    """
+    var k = 0
+    while k < d:
+        var base = k + Int(warp_id()) * 32
+        if base < d:
+            var i = base + Int(lane_id())
+            var v = row[unsafe_offset=i] * inv * w[unsafe_offset=i]
+            _quantize_lane(v, q, ds, ss, row_off + i, (row_off + base) // 32)
+        k += NT
+
+
+def _rmsnorm_quantize_kernel(
+    x: F32Ptr,
+    w: F32Ptr,
+    q: I8Ptr,
+    ds: F32Ptr,
+    ss: F32Ptr,
+    dim: Int32,
+    eps: Float32,
+):
+    var red = unsafe_stack_allocation[
+        NT // 32, Float32, address_space=AddressSpace.SHARED
+    ]()
+    var d = Int(dim)
+    var row_off = Int(block_idx.x) * d
+    var row = x.unsafe_offset(row_off)
+    var sq = Float32(0)
+    var i = Int(thread_idx.x)
+    while i < d:
+        var v = row[unsafe_offset=i]
+        sq += v * v
+        i += NT
+    var total = _block_sum(sq, red)
+    var inv = 1.0 / sqrt(total / Float32(d) + eps)
+    _norm_quantize_pass(row, w, inv, q, ds, ss, d, row_off)
+
+
+def _add_rmsnorm_quantize_kernel(
+    x: F32Ptr,
+    h: F32Ptr,
+    w: F32Ptr,
+    q: I8Ptr,
+    ds: F32Ptr,
+    ss: F32Ptr,
+    dim: Int32,
+    eps: Float32,
+):
+    var red = unsafe_stack_allocation[
+        NT // 32, Float32, address_space=AddressSpace.SHARED
+    ]()
+    var d = Int(dim)
+    var row_off = Int(block_idx.x) * d
+    var row = x.unsafe_offset(row_off)
+    var hrow = h.unsafe_offset(row_off)
+    var sq = Float32(0)
+    var i = Int(thread_idx.x)
+    while i < d:
+        var v = row[unsafe_offset=i] + hrow[unsafe_offset=i]
+        row[unsafe_offset=i] = v
+        sq += v * v
+        i += NT
+    # The second pass reads back the values this same thread wrote.
+    var total = _block_sum(sq, red)
+    var inv = 1.0 / sqrt(total / Float32(d) + eps)
+    _norm_quantize_pass(row, w, inv, q, ds, ss, d, row_off)
+
+
+def _silu_mul_quantize_kernel(
+    g: F32Ptr, u: F32Ptr, q: I8Ptr, ds: F32Ptr, ss: F32Ptr, n_blocks: Int32
+):
+    var b = Int(block_idx.x) * (NT // 32) + Int(warp_id())
+    if b >= Int(n_blocks):
+        return
+    var i = b * QK + Int(lane_id())
+    var a = g[unsafe_offset=i]
+    _quantize_lane(a / (1.0 + exp(-a)) * u[unsafe_offset=i], q, ds, ss, i, b)
+
+
+def _check_quant_shape(qa: GpuQActs, n_tokens: Int, K: Int) raises:
+    if K != qa.K or n_tokens > qa.max_tokens or K % QK != 0:
+        raise Error("activation buffer is the wrong shape")
+
+
+def rmsnorm_quantize_gpu(
+    ctx: DeviceContext,
+    x: F32Ptr,
+    w: F32Ptr,
+    qa: GpuQActs,
+    rows: Int,
+    dim: Int,
+    eps: Float32,
+) raises:
+    """quantize(rmsnorm(x)) in one launch; the normalized f32 rows are not
+    stored."""
+    _check_quant_shape(qa, rows, dim)
+    ctx.enqueue_function[_rmsnorm_quantize_kernel](
+        x,
+        w,
+        dev_i8(qa.q),
+        dev_f32(qa.d),
+        dev_f32(qa.s),
+        Int32(dim),
+        eps,
+        grid_dim=rows,
+        block_dim=NT,
+    )
+
+
+def add_rmsnorm_quantize_gpu(
+    ctx: DeviceContext,
+    x: F32Ptr,
+    h: F32Ptr,
+    w: F32Ptr,
+    qa: GpuQActs,
+    rows: Int,
+    dim: Int,
+    eps: Float32,
+) raises:
+    """x += h, then quantize(rmsnorm(x)), in one launch. x keeps the sum (it
+    is the residual stream); the normalized f32 rows are not stored."""
+    _check_quant_shape(qa, rows, dim)
+    ctx.enqueue_function[_add_rmsnorm_quantize_kernel](
+        x,
+        h,
+        w,
+        dev_i8(qa.q),
+        dev_f32(qa.d),
+        dev_f32(qa.s),
+        Int32(dim),
+        eps,
+        grid_dim=rows,
+        block_dim=NT,
+    )
+
+
+def silu_mul_quantize_gpu(
+    ctx: DeviceContext,
+    g: F32Ptr,
+    u: F32Ptr,
+    qa: GpuQActs,
+    rows: Int,
+    dim: Int,
+) raises:
+    """quantize(silu(g) * u) in one launch; g and u are left as they were."""
+    _check_quant_shape(qa, rows, dim)
+    var nb = rows * dim // QK
+    ctx.enqueue_function[_silu_mul_quantize_kernel](
+        g,
+        u,
         dev_i8(qa.q),
         dev_f32(qa.d),
         dev_f32(qa.s),

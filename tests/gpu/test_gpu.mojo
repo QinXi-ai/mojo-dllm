@@ -20,6 +20,9 @@ from mojo_dllm.gpu.kernels import (
     add_gpu,
     add_bias_gpu,
     quantize_gpu,
+    rmsnorm_quantize_gpu,
+    add_rmsnorm_quantize_gpu,
+    silu_mul_quantize_gpu,
     gemm_gpu,
     staged_matrix_bytes,
     dev_f32,
@@ -309,6 +312,113 @@ def _check_quantize(n_tokens: Int, K: Int) raises:
 def test_quantize_matches_formula() raises:
     _check_quantize(1, 256)
     _check_quantize(37, 512)
+
+
+def _same_quant(
+    ctx: DeviceContext,
+    a: GpuQActs,
+    b: GpuQActs,
+    rows: Int,
+    K: Int,
+    what: String,
+) raises:
+    """Two quantized activation sets are identical: values, scales and sums."""
+    var qa = Bytes(rows * K)
+    var qb = Bytes(rows * K)
+    ctx.enqueue_copy(qa.i8(), a.q.create_sub_buffer[DType.int8](0, qa.size))
+    ctx.enqueue_copy(qb.i8(), b.q.create_sub_buffer[DType.int8](0, qb.size))
+    var nb = rows * K // 32
+    var da = _down(ctx, a.d, nb)
+    var db = _down(ctx, b.d, nb)
+    var sa = _down(ctx, a.s, nb)
+    var sb = _down(ctx, b.s, nb)
+    for i in range(rows * K):
+        assert_equal(
+            Int(qa.i8()[unsafe_offset=i]),
+            Int(qb.i8()[unsafe_offset=i]),
+            what + ": value " + String(i),
+        )
+    for i in range(nb):
+        assert_equal(da[i], db[i], what + ": scale " + String(i))
+        assert_equal(sa[i], sb[i], what + ": sum " + String(i))
+
+
+def _check_rmsnorm_quantize(rows: Int, K: Int) raises:
+    var ctx = DeviceContext()
+    var x = Floats(rows * K)
+    var w = Floats(K)
+    _fill(x, 31)
+    _fill(w, 32)
+    var dw = _up(ctx, w)
+    var dx = _up(ctx, x)
+    var xn = ctx.enqueue_create_buffer[DType.float32](rows * K)
+    var chain = GpuQActs(ctx, rows, K)
+    rmsnorm_gpu(ctx, dev_f32(dx), dev_f32(dw), dev_f32(xn), rows, K, 1e-5)
+    quantize_gpu(ctx, dev_f32(xn), rows, K, chain)
+    var fused = GpuQActs(ctx, rows, K)
+    rmsnorm_quantize_gpu(ctx, dev_f32(dx), dev_f32(dw), fused, rows, K, 1e-5)
+    _same_quant(ctx, chain, fused, rows, K, "rmsnorm+quantize")
+
+
+def test_fused_rmsnorm_quantize_matches_chain() raises:
+    _check_rmsnorm_quantize(4, 1024)
+    # 288 = 9 x 32: the second pass of the block loop covers one warp only.
+    _check_rmsnorm_quantize(5, 288)
+
+
+def _check_add_rmsnorm_quantize(rows: Int, K: Int) raises:
+    var ctx = DeviceContext()
+    var x = Floats(rows * K)
+    var h = Floats(rows * K)
+    var w = Floats(K)
+    _fill(x, 41)
+    _fill(h, 42)
+    _fill(w, 43)
+    var dw = _up(ctx, w)
+    var dh = _up(ctx, h)
+    var x1 = _up(ctx, x)
+    var xn = ctx.enqueue_create_buffer[DType.float32](rows * K)
+    var chain = GpuQActs(ctx, rows, K)
+    add_gpu(ctx, dev_f32(x1), dev_f32(dh), rows * K)
+    rmsnorm_gpu(ctx, dev_f32(x1), dev_f32(dw), dev_f32(xn), rows, K, 1e-5)
+    quantize_gpu(ctx, dev_f32(xn), rows, K, chain)
+    var x2 = _up(ctx, x)
+    var fused = GpuQActs(ctx, rows, K)
+    add_rmsnorm_quantize_gpu(
+        ctx, dev_f32(x2), dev_f32(dh), dev_f32(dw), fused, rows, K, 1e-5
+    )
+    _same_quant(ctx, chain, fused, rows, K, "add+rmsnorm+quantize")
+    var a = _down(ctx, x1, rows * K)
+    var b = _down(ctx, x2, rows * K)
+    for i in range(rows * K):
+        assert_equal(a[i], b[i], "residual " + String(i))
+
+
+def test_fused_add_rmsnorm_quantize_matches_chain() raises:
+    _check_add_rmsnorm_quantize(4, 1024)
+    _check_add_rmsnorm_quantize(5, 288)
+
+
+def test_fused_silu_mul_quantize_matches_chain() raises:
+    var ctx = DeviceContext()
+    var rows = 3
+    var K = 768
+    var g = Floats(rows * K)
+    var u = Floats(rows * K)
+    _fill(g, 51)
+    _fill(u, 52)
+    var du = _up(ctx, u)
+    var g1 = _up(ctx, g)
+    var chain = GpuQActs(ctx, rows, K)
+    silu_mul_gpu(ctx, dev_f32(g1), dev_f32(du), rows * K)
+    quantize_gpu(ctx, dev_f32(g1), rows, K, chain)
+    var g2 = _up(ctx, g)
+    var fused = GpuQActs(ctx, rows, K)
+    silu_mul_quantize_gpu(ctx, dev_f32(g2), dev_f32(du), fused, rows, K)
+    _same_quant(ctx, chain, fused, rows, K, "silu_mul+quantize")
+    var left = _down(ctx, g2, rows * K)
+    for i in range(rows * K):
+        assert_equal(left[i], g[i], "g untouched " + String(i))
 
 
 def _check_gemm(name: String, n_tokens: Int, rows: Int = 0) raises:
