@@ -104,14 +104,17 @@ arithmetic is unchanged, so the logits are too
 
 **Prefetching the next super-block.** On the kernel before the packed layout,
 removing staging saved about 120 ms of the GEMM and removing the mma 4 to
-7 ms (`bench/checks/2026-10-13-gemm-cost-split.json`), and the packed layout
-(128-row blocks) cut the cost only partly. The loop still copied a
-super-block, waited at a barrier, and only then computed. Now each thread
+7 ms, both measured against the integer-accumulation variant
+(`bench/checks/2026-10-13-gemm-cost-split.json`). The packed layout (128-row
+blocks) took that harness from 258.7 to 215.1 ms without a breakdown of the
+staging share. The loop still copied a super-block, waited at a barrier, and
+only then computed. Now each thread
 reads super-block b + 1 from global memory into registers (weights,
 activation bytes and activation scales) before the mma loop of b, and stores
 it to shared memory at the top of the next iteration, after the barrier that
-ends b. The Q4_K GEMM went from 148.8 to 87.2 ms per forward (middle value
-of three interleaved traces, `bench/profiles/2026-10-13-gemm4-*`), and the
+ends b. The Q4_K GEMM went from 148.8 to 87.2 ms per forward (median
+launch time times launches, middle value of three interleaved traces,
+`bench/profiles/2026-10-13-gemm4-*`), and the
 logits match main on all 84 rows (`bench/checks/2026-10-13-gemm4-logits.json`).
 That the gain comes from overlapping the loads with compute is the reading
 the numbers fit; no hardware counters were collected to confirm it.

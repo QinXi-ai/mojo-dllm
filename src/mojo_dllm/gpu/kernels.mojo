@@ -995,7 +995,7 @@ def _q4k_mma_kernel[
     var ra = 16 * warp + g
     var rb = ra + 8
     # Super-block b + 1 is read from global memory into registers while b
-    # runs on the tensor cores, so the loads overlap with compute.
+    # runs on the tensor cores, so the loads can overlap with compute.
     var nb = k // 256
     var wv = _q4k_load(w, row_bytes, r0, n_rows, 0, th)
     var av = _acts_load[BN, Q4K_THREADS](aq, k, n_tok, t0, 0, th)

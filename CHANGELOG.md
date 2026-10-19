@@ -39,8 +39,9 @@ semantic versioning (0.y: minor bumps may break things).
   unchanged (`bench/checks/2026-10-13-gemm3-logits.json`).
 - The Q4_K GPU GEMM reads the next super-block into registers while the
   tensor cores work on the current one. LLaDA-8B at 148 tokens: Q4_K GEMM
-  148.8 to 87.2 ms per forward (middle value of three interleaved traces,
-  `bench/profiles/2026-10-13-gemm4-*`), logits unchanged
+  148.8 to 87.2 ms per forward (median launch time times launches, middle
+  value of three interleaved traces, `bench/profiles/2026-10-13-gemm4-*`),
+  logits unchanged
   (`bench/checks/2026-10-13-gemm4-logits.json`).
 - GPU attention runs on the f16 tensor cores (`mma.m16n8k16`, f32
   accumulation): each warp takes 16 queries, and P goes from the score mma to
