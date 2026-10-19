@@ -27,6 +27,9 @@ from mojo_dllm.gpu.kernels import (
     stage_matrix,
     dev_i8,
     dev_i32,
+    dev_f64,
+    row_stats_gpu,
+    RS_FIELDS,
     mma_tile_gpu,
     _pick_bn,
 )
@@ -40,7 +43,14 @@ from mojo_dllm.kernels.ops import (
     add_inplace,
     add_bias,
 )
-from mojo_dllm.models.transformer import DiffusionLM
+from mojo_dllm.diffusion.sampler import (
+    GenConfig,
+    _confidence,
+    _confidence_from_stats,
+    argmax_and_prob,
+    generate,
+)
+from mojo_dllm.models.transformer import DiffusionLM, RowStats
 from mojo_dllm.quant.kquants import dequant_row
 from mojo_dllm.sys.mem import F32Ptr, I8Ptr, I32Ptr, U8Ptr, Floats, Bytes
 from mojo_dllm.sys.mmap import Mapping
@@ -454,6 +464,101 @@ def test_forward_subset_rows_match_full() raises:
                 ),
             )
     assert_true(worst < 1e-3, "subset rows differ by " + String(worst))
+
+
+def _close(got: Float64, want: Float64, rel: Float64, floor: Float64) -> Bool:
+    return abs(got - want) <= rel * abs(want) + floor
+
+
+def _check_row_stats(vocab: Int, n_rows: Int, seed: Int) raises:
+    """The device reductions give the host's token and confidences, row by row.
+
+    The grid of values _fill draws from repeats, so every row holds its maximum
+    several times, and row 1 gets two extra copies of a larger value: the
+    first index must win a tie.
+    """
+    var ctx = DeviceContext()
+    var x = Floats(n_rows * vocab)
+    _fill(x, seed)
+    x[vocab + 5] = 9.0
+    x[vocab + vocab // 2] = 9.0
+    var dx = _up(ctx, x)
+    var tok = ctx.enqueue_create_buffer[DType.int32](n_rows)
+    var val = ctx.enqueue_create_buffer[DType.float64](RS_FIELDS * n_rows)
+    row_stats_gpu(ctx, dev_f32(dx), n_rows, vocab, dev_i32(tok), dev_f64(val))
+    var htok = Bytes(4 * n_rows)
+    var hval = Bytes(8 * RS_FIELDS * n_rows)
+    ctx.enqueue_copy(htok.i32(), tok)
+    ctx.enqueue_copy(hval.f64(), val)
+    ctx.synchronize()
+    var st = RowStats()
+    for j in range(n_rows):
+        st.tok.append(Int(htok.i32()[unsafe_offset=j]))
+        st.mx.append(hval.f64()[unsafe_offset=RS_FIELDS * j])
+        st.z.append(hval.f64()[unsafe_offset=RS_FIELDS * j + 1])
+        st.second.append(hval.f64()[unsafe_offset=RS_FIELDS * j + 2])
+        st.weighted.append(hval.f64()[unsafe_offset=RS_FIELDS * j + 3])
+    assert_equal(st.tok[1], 5)
+    for j in range(n_rows):
+        var row = x.ptr().unsafe_offset(j * vocab)
+        var want = argmax_and_prob(row, vocab)
+        var at = " (row " + String(j) + ", vocab " + String(vocab) + ")"
+        assert_equal(st.tok[j], want[0], "argmax" + at)
+        assert_true(
+            _close(_confidence_from_stats(st, j, "llada"), want[1], 1e-5, 0.0),
+            "probability" + at,
+        )
+        for algo in ["maskgit_plus", "topk_margin", "entropy"]:
+            var w = _confidence(row, vocab, algo)
+            assert_equal(st.tok[j], w[0], algo + " token" + at)
+            assert_true(
+                _close(_confidence_from_stats(st, j, algo), w[1], 1e-5, 1e-5),
+                algo + " confidence" + at,
+            )
+
+
+def test_row_stats_match_host_small_vocab() raises:
+    _check_row_stats(1000, 5, 3)
+
+
+def test_row_stats_match_host_full_vocab() raises:
+    _check_row_stats(126464, 3, 7)
+
+
+def test_forward_stats_match_forward_logits() raises:
+    var toks: List[Int] = [5, 17, 300, 7, 9, 42, 100, 7]
+    var rows: List[Int] = [1, 4, 7]
+    var m = GpuDiffusionLM(FIX + "tiny-llada.gguf", max_tokens=16)
+    var lg = Floats(len(rows) * 512)
+    m.forward(toks, rows, lg.ptr())
+    var st = RowStats()
+    m.forward_stats(toks, rows, st)
+    assert_equal(len(st.tok), len(rows))
+    for j in range(len(rows)):
+        var want = argmax_and_prob(lg.ptr().unsafe_offset(j * 512), 512)
+        assert_equal(st.tok[j], want[0])
+        assert_true(
+            _close(_confidence_from_stats(st, j, "llada"), want[1], 1e-5, 0.0),
+            "probability of row " + String(j),
+        )
+
+
+def test_generation_with_device_stats_matches_host_scoring() raises:
+    var m = GpuDiffusionLM(FIX + "tiny-llada.gguf", max_tokens=16)
+    var prompt: List[Int] = [5, 17, 300]
+    var c = GenConfig()
+    c.gen_length = 8
+    c.block_length = 4
+    c.steps = 4
+    c.mask_id = 511
+    var device = generate(m, prompt, c)
+    # full_logits copies every row to the host and scores it there.
+    var h = c.copy()
+    h.full_logits = True
+    var host = generate(m, prompt, h)
+    assert_equal(len(device.tokens), len(host.tokens))
+    for i in range(len(host.tokens)):
+        assert_equal(device.tokens[i], host.tokens[i], "token " + String(i))
 
 
 def main() raises:

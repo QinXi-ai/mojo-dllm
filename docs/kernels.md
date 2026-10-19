@@ -118,6 +118,19 @@ and 17 floats for the same reason.
 `tests/gpu/test_gpu.mojo` checks the fragment layout against a CPU matmul
 on random int8 matrices, and the whole kernel against an f64 GEMM.
 
+**Row statistics on the device.** A greedy step needs, per masked row, the
+argmax and a confidence. Copying the logits to the host (32 rows of 126,464
+floats for a 32-token block) and looping over them there is the largest piece
+of a step outside the forward pass. One block per row now reads its logits
+twice: the first pass finds the first index of the maximum (a tie goes to the
+smaller index, as the host loop picks it), the second accumulates, in f64,
+the sum of exp(x - max), the sum of exp(x - max)(x - max) and the largest
+logit at any other index. The sampler finishes from those four numbers:
+p = 1 / z for LLaDA and maskgit_plus, p minus the runner-up's probability
+for topk_margin, and sum e (x - max) / z - log z for Dream's entropy.
+The exponentials are f32, so a confidence differs from the host's f64 loop in
+the sixth digit; tests bound it at 1e-5 relative.
+
 **Attention on f16 tensor cores.** Each warp owns 16 queries and walks the
 keys 32 at a time. Q is scaled by 1/sqrt(d) and held in registers as f16
 fragments; K is staged row-major and V transposed, both as f16, so every

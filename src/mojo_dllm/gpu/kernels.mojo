@@ -30,7 +30,7 @@ from max.gpu.primitives.warp import (
 )
 
 from mojo_dllm.formats.gguf import GGML_Q4_K, GGML_Q6_K, ggml_type_name
-from mojo_dllm.sys.mem import F32Ptr, I8Ptr, I32Ptr, U8Ptr
+from mojo_dllm.sys.mem import F32Ptr, F64Ptr, I8Ptr, I32Ptr, U8Ptr
 
 comptime QK = 32
 """Activation values per int8 scale."""
@@ -40,6 +40,9 @@ comptime Q6K_STAGED = 212
 comptime NT = 256
 comptime SharedF32 = Pointer[
     Float32, MutUntrackedOrigin, address_space=AddressSpace.SHARED
+]
+comptime SharedF64 = Pointer[
+    Float64, MutUntrackedOrigin, address_space=AddressSpace.SHARED
 ]
 
 
@@ -62,6 +65,11 @@ def dev_i8(b: DeviceBuffer[DType.int8]) -> I8Ptr:
 @always_inline
 def dev_i32(b: DeviceBuffer[DType.int32]) -> I32Ptr:
     return I32Ptr(unsafe_from_address=Int(b.unsafe_ptr()))
+
+
+@always_inline
+def dev_f64(b: DeviceBuffer[DType.float64]) -> F64Ptr:
+    return F64Ptr(unsafe_from_address=Int(b.unsafe_ptr()))
 
 
 @always_inline
@@ -441,6 +449,139 @@ def attention_gpu(
             "GPU attention supports head dimensions 64 and 128, got "
             + String(head_dim)
         )
+
+
+# ------------------------------------------------------------- row statistics
+
+comptime RS_THREADS = 256
+"""Threads per block of the row-statistics kernel (a power of two)."""
+comptime RS_FIELDS = 4
+"""f64 values written per row: max, sum, runner-up, weighted sum."""
+
+
+@always_inline
+def _block_sum_f64(red: SharedF64, v: Float64, th: Int) -> Float64:
+    """Sum over RS_THREADS threads; every thread gets the total."""
+    red[unsafe_offset=th] = v
+    barrier()
+    var s = RS_THREADS // 2
+    while s > 0:
+        if th < s:
+            red[unsafe_offset=th] = (
+                red[unsafe_offset=th] + red[unsafe_offset=th + s]
+            )
+        barrier()
+        s //= 2
+    var r = red[unsafe_offset=0]
+    barrier()
+    return r
+
+
+@always_inline
+def _block_max_f64(red: SharedF64, v: Float64, th: Int) -> Float64:
+    """Max over RS_THREADS threads; every thread gets the result."""
+    red[unsafe_offset=th] = v
+    barrier()
+    var s = RS_THREADS // 2
+    while s > 0:
+        if th < s:
+            red[unsafe_offset=th] = max(
+                red[unsafe_offset=th], red[unsafe_offset=th + s]
+            )
+        barrier()
+        s //= 2
+    var r = red[unsafe_offset=0]
+    barrier()
+    return r
+
+
+def _row_stats_kernel(logits: F32Ptr, vocab: Int32, tok: I32Ptr, stats: F64Ptr):
+    """Reduce one logits row (block b reads row b) to what the samplers score.
+
+    tok[b] is the first index of the maximum, as the host argmax picks it.
+    stats[4b ..] holds, with m the maximum and e_v = exp(logit_v - m):
+    m, sum e_v, the largest logit at any index other than tok[b], and
+    sum e_v (logit_v - m). Sums are f64; the exponentials are f32.
+    """
+    var sv = unsafe_stack_allocation[
+        RS_THREADS, Float32, address_space=AddressSpace.SHARED
+    ]()
+    var si = unsafe_stack_allocation[
+        RS_THREADS, Int32, address_space=AddressSpace.SHARED
+    ]()
+    var red = unsafe_stack_allocation[
+        RS_THREADS, Float64, address_space=AddressSpace.SHARED
+    ]()
+    var th = Int(thread_idx.x)
+    var n = Int(vocab)
+    var row = logits.unsafe_offset(Int(block_idx.x) * n)
+    # First index of the maximum: a larger value wins, a tie goes to the
+    # smaller index.
+    var bv = Float32.MIN
+    var bi = Int32.MAX
+    for v in range(th, n, RS_THREADS):
+        var x = row[unsafe_offset=v]
+        if x > bv:
+            bv = x
+            bi = Int32(v)
+    sv[unsafe_offset=th] = bv
+    si[unsafe_offset=th] = bi
+    barrier()
+    var s = RS_THREADS // 2
+    while s > 0:
+        if th < s:
+            var v2 = sv[unsafe_offset=th + s]
+            var i2 = si[unsafe_offset=th + s]
+            var v1 = sv[unsafe_offset=th]
+            var i1 = si[unsafe_offset=th]
+            if v2 > v1 or (v2 == v1 and i2 < i1):
+                sv[unsafe_offset=th] = v2
+                si[unsafe_offset=th] = i2
+        barrier()
+        s //= 2
+    var m = sv[unsafe_offset=0]
+    var best = Int(si[unsafe_offset=0])
+    barrier()
+    var z = Float64(0)
+    var a = Float64(0)
+    var second = Float64(-1e300)
+    for v in range(th, n, RS_THREADS):
+        var x = row[unsafe_offset=v]
+        var dx = x - m
+        var e = Float64(exp(dx))
+        z += e
+        a += e * Float64(dx)
+        if v != best:
+            second = max(second, Float64(x))
+    z = _block_sum_f64(red, z, th)
+    a = _block_sum_f64(red, a, th)
+    second = _block_max_f64(red, second, th)
+    if th == 0:
+        var b = Int(block_idx.x)
+        tok[unsafe_offset=b] = Int32(best)
+        stats[unsafe_offset=RS_FIELDS * b] = Float64(m)
+        stats[unsafe_offset=RS_FIELDS * b + 1] = z
+        stats[unsafe_offset=RS_FIELDS * b + 2] = second
+        stats[unsafe_offset=RS_FIELDS * b + 3] = a
+
+
+def row_stats_gpu(
+    ctx: DeviceContext,
+    logits: F32Ptr,
+    n_rows: Int,
+    vocab: Int,
+    tok: I32Ptr,
+    stats: F64Ptr,
+) raises:
+    """Greedy token and softmax statistics of each of n_rows logits rows."""
+    ctx.enqueue_function[_row_stats_kernel](
+        logits,
+        Int32(vocab),
+        tok,
+        stats,
+        grid_dim=n_rows,
+        block_dim=RS_THREADS,
+    )
 
 
 # ---------------------------------------------------------------- elementwise

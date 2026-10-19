@@ -8,6 +8,14 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
+- Greedy decoding scores each requested row on the GPU. One block per row
+  reduces its logits to the first argmax, the maximum, the sum of
+  exp(x - max), the runner-up logit and the sum of exp(x - max)(x - max); the
+  host turns those numbers into the LLaDA probability or Dream's entropy,
+  maskgit_plus and topk_margin confidence, so a step copies a few hundred
+  bytes instead of the logits rows. `--temperature` above 0 and
+  `--full-logits` keep the host path. Tests compare the kernel with the host
+  loops (issue #9); the time saved per step is measured separately.
 - Generation stops once the printed answer is final (an end-of-text token
   after a fully committed answer). The output is identical; `--no-early-stop`
   runs every step, and the harnesses pass it so comparisons stay step for
