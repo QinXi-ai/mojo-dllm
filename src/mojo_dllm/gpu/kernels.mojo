@@ -541,6 +541,9 @@ def _row_stats_kernel(logits: F32Ptr, vocab: Int32, tok: I32Ptr, stats: F64Ptr):
         s //= 2
     var m = sv[unsafe_offset=0]
     var best = Int(si[unsafe_offset=0])
+    if best == Int(Int32.MAX):
+        # No value beat the sentinel (a row of NaN): the host loop's answer.
+        best = 0
     barrier()
     var z = Float64(0)
     var a = Float64(0)
