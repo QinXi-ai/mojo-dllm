@@ -491,10 +491,10 @@ def test_attention_more_keys_than_queries_matches_cpu() raises:
         NK,
     )
     var got = _down(ctx, do_, want.n)
-    assert_true(
-        _max_abs(got, want) < 1e-4,
-        "attention over cached keys " + String(_max_abs(got, want)),
-    )
+    # The f16 kernel's error against the f32 reference is relative to the
+    # output scale, like the other attention tests (measured about 3e-4 there).
+    var rel = _rel(got, want)
+    assert_true(rel < 2e-3, "attention over cached keys, rel " + String(rel))
 
 
 def _window_rows() -> List[Int]:
