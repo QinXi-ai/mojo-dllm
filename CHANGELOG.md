@@ -34,9 +34,9 @@ semantic versioning (0.y: minor bumps may break things).
 
 - The Q6_K GPU GEMM copies each 224-byte block to shared memory as it is,
   unpacks the A fragments in registers and prefetches the next super-block,
-  as the Q4_K kernel does. The staged block grows from 212 to 224 bytes (about
-  40 MB on LLaDA-8B). The accumulation order is unchanged. The time saved is
-  measured separately (issue #11).
+  as the Q4_K kernel does. The staged block grows from 212 to 224 bytes (74.6
+  MB more device memory on LLaDA-8B). The accumulation order is unchanged.
+  The time saved is measured separately (issue #11).
 - The Q4_K GPU GEMM keeps weights packed in shared memory and unpacks them
   in registers, staging with 16-byte copies; a block now covers 128 rows with
   8 warps. LLaDA-8B at 148 tokens: Q4_K GEMM 186.9 to 148.4 ms per forward

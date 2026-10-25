@@ -79,12 +79,12 @@ activation scale:
 sum w x = d*sc*dx * sum(q * qx)  -  dmin*m * (dx * sum(qx))
 ```
 
-**One mma per sub-block.** A Q6_K thread block computes 64 weight rows by a
-tile of 32, 64 or 80 tokens. For each 256-wide super-block it unpacks the
-weights into shared memory as int8 (q - 32), copies the matching activations
-next to them, and each of its 4 warps runs
-`mma.m16n8k32.s8` per sub-block for its 16 rows and every 8 tokens. Q6_K
-scales every 16 weights, so it uses `mma.m16n8k16` instead, one per scale.
+**One mma per scale group.** A Q6_K thread block computes 64 weight rows by a
+tile of 32, 64 or 80 tokens. For each 256-wide super-block it copies the
+weights into shared memory (see the Q6_K paragraph below), copies the matching
+activations next to them, and each of its 4 warps runs one `mma.m16n8k16.s8`
+per 16-weight scale group for its 16 rows and every 8 tokens. (A Q4_K block
+scales every 32 weights, so it runs `mma.m16n8k32.s8` per sub-block instead.)
 The int32 result goes to f32 with the two scales and, for Q4_K, the min term.
 
 **Q4_K: packed in shared memory, unpacked in registers.** Removing the staging
@@ -126,8 +126,9 @@ loads; a warp rebuilds each 16-weight group's A fragment in registers
 (`_q6k_frag`: nibble, two high bits, minus 32 by an xor and a sign extension),
 and the next super-block waits in registers while the mma loop runs. Groups
 accumulate in the same order as before, so the result is unchanged. The
-padded block costs 14 bytes more per 210 than the raw block (about 40 MB on
-LLaDA-8B).
+padded block is 12 bytes larger than the 212-byte padding it replaces: with
+6,217,728 Q6_K blocks in LLaDA-8B Q4_K_M (output, 16 attn_v and 16 ffn_down
+tensors) that is 74.6 MB (71.2 MiB) more device memory.
 
 **Tile width per call.** Unpacking a weight tile costs the same however
 many tokens then use it, so the widest tile that saves a tile wins: a
