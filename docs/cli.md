@@ -58,7 +58,7 @@ Errors name the thing that is wrong and exit with status 1:
 
 ```text
 ERROR: unsupported GGUF tensor type: IQ2_XXS
-ERROR: unsupported model architecture: qwen2
+ERROR: unsupported model architecture: qwen2 (supported: llada, dream)
 ERROR: required metadata key missing: tokenizer.ggml.model
 ERROR: tensor shape mismatch for blk.0.attn_q.weight: [4096, 2048], expected [4096, 4096]
 ERROR: no GPU found: the GPU backend needs an NVIDIA GPU with compute capability 8.0 or newer (run with --device cpu)

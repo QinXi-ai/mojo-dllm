@@ -62,7 +62,11 @@ struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
     def __init__(out self, g: GGUFFile) raises:
         self.arch = g.architecture()
         if self.arch != "llada" and self.arch != "dream":
-            raise Error("unsupported model architecture: " + self.arch)
+            raise Error(
+                "unsupported model architecture: "
+                + self.arch
+                + " (supported: llada, dream)"
+            )
         var a = self.arch + "."
         self.n_layers = g.get_int(a + "block_count")
         self.hidden = g.get_int(a + "embedding_length")
@@ -94,6 +98,39 @@ struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
             raise Error("hidden size is not divisible by the head count")
         if self.n_heads % self.n_kv_heads != 0:
             raise Error("query heads are not a multiple of KV heads")
+        var rotary_width = g.get_int_or(
+            a + "rope.dimension_count", self.head_dim
+        )
+        if rotary_width != self.head_dim:
+            raise Error(
+                a
+                + "rope.dimension_count must equal head dimension "
+                + String(self.head_dim)
+                + ", got "
+                + String(rotary_width)
+            )
+        var key_length = g.get_int_or(a + "attention.key_length", self.head_dim)
+        if key_length != self.head_dim:
+            raise Error(
+                a
+                + "attention.key_length must equal head dimension "
+                + String(self.head_dim)
+                + ", got "
+                + String(key_length)
+            )
+        var scaling = g.get_str_or(a + "rope.scaling.type", "none")
+        if scaling != "none" and scaling != "linear":
+            raise Error(
+                a
+                + "rope.scaling.type is unsupported: "
+                + scaling
+                + " (supported: none, linear with factor 1)"
+            )
+        var factor = g.get_f32_or(a + "rope.scaling.factor", 1.0)
+        if factor != 1.0:
+            raise Error(
+                a + "rope.scaling.factor must be 1, got " + String(factor)
+            )
 
     def kv_dim(self) -> Int:
         return self.n_kv_heads * self.head_dim

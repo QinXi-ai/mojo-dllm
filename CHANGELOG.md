@@ -8,6 +8,8 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
+- `scripts/check_weights.py` compares GGUF tensor shapes with safetensors
+  headers, with LLaDA/Dream name mapping and a standalone self-test.
 - Generation stops once the printed answer is final (an end-of-text token
   after a fully committed answer). The output is identical; `--no-early-stop`
   runs every step, and the harnesses pass it so comparisons stay step for
@@ -32,6 +34,8 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Changed
 
+- Model configuration rejects incompatible RoPE widths/scaling and attention
+  key lengths, and unsupported-architecture errors list LLaDA and Dream.
 - The Q4_K GPU GEMM keeps weights packed in shared memory and unpacks them
   in registers, staging with 16-byte copies; a block now covers 128 rows with
   8 warps. LLaDA-8B at 148 tokens: Q4_K GEMM 186.9 to 148.4 ms per forward
