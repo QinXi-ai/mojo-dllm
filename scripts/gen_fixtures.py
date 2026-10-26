@@ -310,6 +310,9 @@ def main() -> None:
     kquants()
     tiny_llada()
     tiny_dream()
+    malformed = OUT / "malformed"
+    malformed.mkdir(parents=True, exist_ok=True)
+    (malformed / "empty.gguf").write_bytes(b"")
     for p in sorted(OUT.iterdir()):
         print(f"{p.stat().st_size:>9}  {p.relative_to(ROOT)}")
 
