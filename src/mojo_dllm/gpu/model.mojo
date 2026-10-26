@@ -14,7 +14,7 @@ from std.time import perf_counter_ns
 
 from max.gpu.host import DeviceBuffer, DeviceContext
 
-from mojo_dllm.formats.gguf import GGUFFile, TensorInfo
+from mojo_dllm.formats.gguf import GGUFFile, TensorInfo, ggml_row_bytes
 from mojo_dllm.gpu.kernels import (
     GpuQActs,
     add_bias_gpu,
@@ -34,7 +34,7 @@ from mojo_dllm.gpu.kernels import (
 )
 from mojo_dllm.kernels.ops import rope_table
 from mojo_dllm.models.transformer import DenoisingModel, ModelConfig, Timings
-from mojo_dllm.quant.kquants import dequant_row
+from mojo_dllm.quant.kquants import dequant_row, check_matrix_type
 from mojo_dllm.sys.mem import Bytes, F32Ptr, Floats, I32Ptr, U8Ptr
 
 comptime ALIGN = 256
@@ -106,6 +106,7 @@ def _plan_matrix(
             + String(rows)
             + "]"
         )
+    check_matrix_type(t)
     var off = plan.take(staged_matrix_bytes(t.ggml_type, rows, cols))
     return DevMatrix(off, t.ggml_type, rows, cols)
 
@@ -175,6 +176,7 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
         var c = self.cfg
         self.max_tokens = max_tokens
         self.embd = self.gguf.tensor("token_embd.weight")
+        _ = ggml_row_bytes(self.embd.ggml_type, self.embd.ne0)
         if self.embd.ne0 != c.hidden:
             raise Error(
                 "tensor shape mismatch for token_embd.weight: "

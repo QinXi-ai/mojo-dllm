@@ -6,6 +6,11 @@ from mojo_dllm.formats.gguf import (
     GGML_Q6_K,
     GGML_F16,
     GGML_F32,
+    GGML_Q5_K,
+    GGML_Q8_0,
+    GGML_BF16,
+    ggml_row_bytes,
+    ggml_block_size,
 )
 
 comptime FIX = "tests/fixtures/"
@@ -75,6 +80,20 @@ def test_type_names() raises:
     var g = GGUFFile(FIX + "kquants.gguf")
     assert_equal(g.tensor("q4k").type_name(), "Q4_K")
     assert_equal(g.tensor("q6k").type_name(), "Q6_K")
+
+
+def test_reference_type_sizes_and_directory() raises:
+    assert_equal(ggml_row_bytes(GGML_Q5_K, 512), 352)
+    assert_equal(ggml_row_bytes(GGML_Q8_0, 96), 102)
+    assert_equal(ggml_row_bytes(GGML_BF16, 40), 80)
+    assert_equal(ggml_block_size(GGML_Q5_K), 256)
+    var g = GGUFFile(FIX + "dequant-types.gguf")
+    assert_equal(g.tensor("q5k").n_bytes, 4 * 352)
+    assert_equal(g.tensor("q8_0").n_bytes, 4 * 102)
+    assert_equal(g.tensor("bf16").n_bytes, 3 * 80)
+    assert_equal(g.tensor("q5k").type_name(), "Q5_K")
+    assert_equal(g.tensor("q8_0").type_name(), "Q8_0")
+    assert_equal(g.tensor("bf16").type_name(), "BF16")
 
 
 def main() raises:

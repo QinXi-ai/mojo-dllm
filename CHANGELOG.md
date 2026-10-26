@@ -8,6 +8,8 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
+- Q8_0 and Q5_K reference decoders, with GGUF type sizing and reference tests
+  for Q8_0, Q5_K and BF16. Matrix kernel support remains Q4_K and Q6_K.
 - Generation stops once the printed answer is final (an end-of-text token
   after a fully committed answer). The output is identical; `--no-early-stop`
   runs every step, and the harnesses pass it so comparisons stay step for
@@ -32,6 +34,8 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Changed
 
+- Matrix load errors name the tensor and distinguish an unsupported type from
+  a decodable type without matrix kernels; unsupported embeddings fail at load.
 - The Q4_K GPU GEMM keeps weights packed in shared memory and unpacks them
   in registers, staging with 16-byte copies; a block now covers 128 rows with
   8 warps. LLaDA-8B at 148 tokens: Q4_K GEMM 186.9 to 148.4 ms per forward

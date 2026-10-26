@@ -23,7 +23,7 @@ import pathlib
 import numpy as np
 from gguf import GGMLQuantizationType as Q
 from gguf import GGUFWriter
-from gguf.quants import dequantize
+from gguf.quants import dequantize, quantize
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "tests" / "fixtures"
@@ -305,11 +305,32 @@ def tiny_dream() -> None:
     print("tiny dream logits std", float(logits.std()), "argmax", logits.argmax(-1).tolist())
 
 
+def dequant_types() -> None:
+    """Reference-only types, independent of the existing fixture RNG stream."""
+    rng = np.random.default_rng(340034)
+    w = GGUFWriter(str(OUT / "dequant-types.gguf"), "test")
+    q8 = quantize(rng.standard_normal((4, 96)).astype(np.float32), Q.Q8_0)
+    bf16 = quantize(rng.standard_normal((3, 40)).astype(np.float32), Q.BF16)
+    q5 = rng.integers(0, 256, (8, 176), dtype=np.uint8)
+    q5[:, :2] = f16_bytes(rng.uniform(0.002, 0.01, 8)).reshape(8, 2)
+    q5[:, 2:4] = f16_bytes(rng.uniform(0.002, 0.01, 8)).reshape(8, 2)
+    q5 = q5.reshape(4, 352)
+    for name, data, kind in (("q8_0", q8, Q.Q8_0), ("bf16", bf16, Q.BF16),
+                             ("q5k", q5, Q.Q5_K)):
+        w.add_tensor(name, data, raw_shape=data.shape, raw_dtype=kind)
+        w.add_tensor(name + ".expected", dequantize(data, kind).astype(np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     kquants()
     tiny_llada()
     tiny_dream()
+    dequant_types()
     for p in sorted(OUT.iterdir()):
         print(f"{p.stat().st_size:>9}  {p.relative_to(ROOT)}")
 

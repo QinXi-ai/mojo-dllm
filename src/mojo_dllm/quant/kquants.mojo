@@ -21,14 +21,18 @@ from mojo_dllm.formats.gguf import (
     GGML_F32,
     GGML_F16,
     GGML_BF16,
+    GGML_Q8_0,
     GGML_Q4_K,
+    GGML_Q5_K,
     GGML_Q6_K,
+    TensorInfo,
     ggml_type_name,
 )
 from mojo_dllm.sys.mem import F32Ptr, U8Ptr
 
 comptime QK_K = 256
 comptime Q4K_BYTES = 144
+comptime Q5K_BYTES = 176
 comptime Q6K_BYTES = 210
 
 
@@ -98,6 +102,74 @@ def dequant_q6k_block(blk: U8Ptr, dst: F32Ptr):
             y.unsafe_store(l + 96, d * s6 * Float32(q4))
 
 
+def has_decoder(t: Int) -> Bool:
+    """Types accepted by the scalar embedding/vector reference path."""
+    return (
+        t == GGML_F32
+        or t == GGML_F16
+        or t == GGML_BF16
+        or t == GGML_Q8_0
+        or t == GGML_Q4_K
+        or t == GGML_Q5_K
+        or t == GGML_Q6_K
+    )
+
+
+def has_matrix_kernel(t: Int) -> Bool:
+    """Types with both CPU and GPU matrix kernels."""
+    return t == GGML_Q4_K or t == GGML_Q6_K
+
+
+def check_matrix_type(t: TensorInfo) raises:
+    if not has_decoder(t.ggml_type):
+        raise Error(
+            "unsupported GGUF tensor type: "
+            + t.type_name()
+            + " (tensor "
+            + t.name
+            + ")"
+        )
+    if not has_matrix_kernel(t.ggml_type):
+        raise Error(
+            "tensor "
+            + t.name
+            + " is "
+            + t.type_name()
+            + ": matrix kernels exist for Q4_K and Q6_K"
+        )
+
+
+def dequant_q8_0_block(blk: U8Ptr, dst: F32Ptr):
+    """One 34-byte block: f16 scale, then 32 signed quants."""
+    var d = load_f16(blk, 0)
+    for i in range(32):
+        var q = bitcast[DType.int8](blk.unsafe_load(2 + i))
+        dst.unsafe_store(i, Float32(q) * d)
+
+
+def dequant_q5k_block(blk: U8Ptr, dst: F32Ptr):
+    """Q4_K scales/mins plus a separate high bit for each of 256 quants."""
+    var d = load_f16(blk, 0)
+    var dmin = load_f16(blk, 2)
+    var scales = blk.unsafe_offset(4)
+    var qh = blk.unsafe_offset(16)
+    var qs = blk.unsafe_offset(48)
+    for j in range(4):
+        var a = q4k_scale_min(scales, 2 * j)
+        var b = q4k_scale_min(scales, 2 * j + 1)
+        var d1 = d * Float32(a[0])
+        var m1 = dmin * Float32(a[1])
+        var d2 = d * Float32(b[0])
+        var m2 = dmin * Float32(b[1])
+        for l in range(32):
+            var byte = Int(qs.unsafe_load(32 * j + l))
+            var high = Int(qh.unsafe_load(l))
+            var q1 = (byte & 15) + (((high >> (2 * j)) & 1) << 4)
+            var q2 = (byte >> 4) + (((high >> (2 * j + 1)) & 1) << 4)
+            dst.unsafe_store(64 * j + l, d1 * Float32(q1) - m1)
+            dst.unsafe_store(64 * j + 32 + l, d2 * Float32(q2) - m2)
+
+
 def dequant_row(ggml_type: Int, src_addr: Int, dst: F32Ptr, n: Int) raises:
     """Decode `n` consecutive elements starting at `src_addr` into f32."""
     var src = U8Ptr(unsafe_from_address=src_addr)
@@ -116,12 +188,26 @@ def dequant_row(ggml_type: Int, src_addr: Int, dst: F32Ptr, n: Int) raises:
             var hi = UInt32(src.unsafe_load(2 * i + 1))
             dst.unsafe_store(i, bitcast[DType.float32]((lo | (hi << 8)) << 16))
         return
+    if ggml_type == GGML_Q8_0:
+        if n % 32 != 0:
+            raise Error("row length " + String(n) + " is not a multiple of 32")
+        for b in range(n // 32):
+            dequant_q8_0_block(
+                src.unsafe_offset(b * 34), dst.unsafe_offset(b * 32)
+            )
+        return
     if n % QK_K != 0:
         raise Error("row length " + String(n) + " is not a multiple of 256")
     if ggml_type == GGML_Q4_K:
         for b in range(n // QK_K):
             dequant_q4k_block(
                 src.unsafe_offset(b * Q4K_BYTES), dst.unsafe_offset(b * QK_K)
+            )
+        return
+    if ggml_type == GGML_Q5_K:
+        for b in range(n // QK_K):
+            dequant_q5k_block(
+                src.unsafe_offset(b * Q5K_BYTES), dst.unsafe_offset(b * QK_K)
             )
         return
     if ggml_type == GGML_Q6_K:

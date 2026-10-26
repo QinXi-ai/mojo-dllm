@@ -32,6 +32,7 @@ comptime GGML_F32 = 0
 comptime GGML_F16 = 1
 comptime GGML_Q8_0 = 8
 comptime GGML_Q4_K = 12
+comptime GGML_Q5_K = 13
 comptime GGML_Q6_K = 14
 comptime GGML_BF16 = 30
 
@@ -102,6 +103,8 @@ def ggml_row_bytes(t: Int, n: Int) raises -> Int:
         return n // 32 * 34
     if t == GGML_Q4_K:
         return n // 256 * 144
+    if t == GGML_Q5_K:
+        return n // 256 * 176
     if t == GGML_Q6_K:
         return n // 256 * 210
     raise Error("unsupported GGUF tensor type: " + ggml_type_name(t))
@@ -117,7 +120,7 @@ def _tensor_bytes(t: Int, ne0: Int, rows: Int) -> Int:
 def ggml_block_size(t: Int) -> Int:
     if t == GGML_Q8_0:
         return 32
-    if t == GGML_Q4_K or t == GGML_Q6_K:
+    if t == GGML_Q4_K or t == GGML_Q5_K or t == GGML_Q6_K:
         return 256
     return 1
 
