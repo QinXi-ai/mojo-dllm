@@ -22,6 +22,16 @@ comptime MADV_POPULATE_READ = 22
 comptime PAGE = 4096
 
 
+def drop_range(addr: Int, size: Int) -> Tuple[Int, Int]:
+    """Whole pages contained in [addr, addr+size); empty when hi <= lo."""
+    return ((addr + PAGE - 1) // PAGE * PAGE, (addr + size) // PAGE * PAGE)
+
+
+def populate_range(addr: Int, size: Int) -> Tuple[Int, Int]:
+    """Whole pages covering [addr, addr+size)."""
+    return (addr // PAGE * PAGE, (addr + size + PAGE - 1) // PAGE * PAGE)
+
+
 struct Mapping(Movable):
     """A whole file mapped read-only. Unmapped when dropped."""
 
@@ -77,8 +87,7 @@ struct Mapping(Movable):
         will not be read again, and leaving them resident would double-count
         the model in RSS. A later read faults the page back in from the file.
         """
-        var lo = (addr + PAGE - 1) // PAGE * PAGE
-        var hi = (addr + size) // PAGE * PAGE
+        var lo, hi = drop_range(addr, size)
         if hi > lo:
             _ = external_call["madvise", c_int](
                 lo, c_size_t(hi - lo), c_int(MADV_DONTNEED)
@@ -91,8 +100,7 @@ struct Mapping(Movable):
         takes one page fault per 4 KiB page; MADV_POPULATE_READ reads the
         range in bulk. Failure (an older kernel) only costs speed.
         """
-        var lo = addr // PAGE * PAGE
-        var hi = (addr + size + PAGE - 1) // PAGE * PAGE
+        var lo, hi = populate_range(addr, size)
         if hi > lo:
             _ = external_call["madvise", c_int](
                 lo, c_size_t(hi - lo), c_int(MADV_POPULATE_READ)
