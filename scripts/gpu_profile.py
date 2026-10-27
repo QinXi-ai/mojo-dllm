@@ -145,8 +145,12 @@ def main() -> int:
     sqlite = base.with_suffix(".sqlite")
     if sqlite.exists():
         sqlite.unlink()
-    kern = run(["nsys", "stats", "--report", "gpukernsum", "--format", "csv", "--output", "-", str(rep)]).stdout
-    mem = run(["nsys", "stats", "--report", "gpumemtimesum", "--format", "csv", "--output", "-", str(rep)]).stdout
+    # gpukerngbsum has one row per kernel and grid shape (GridXYZ, BlockXYZ), which
+    # the GEMM grouping below reads; nsys 2023 cut those columns from gpukernsum.
+    # --force-export: nsys 2023 reports the sqlite its first call wrote as stale to the second.
+    stats = ["nsys", "stats", "--force-export=true", "--format", "csv", "--output", "-"]
+    kern = run(stats + ["--report", "gpukerngbsum", str(rep)]).stdout
+    mem = run(stats + ["--report", "gpumemtimesum", str(rep)]).stdout
 
     def rows(text: str) -> list[dict]:
         lines = [l for l in text.splitlines() if l.startswith(("Time", '"', "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"))]
