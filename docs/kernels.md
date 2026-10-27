@@ -65,8 +65,8 @@ these tests; that mutation check runs before changes to this file land.
 with a layout chosen for tensor cores instead of AVX registers.
 
 **Weights stay in GGUF blocks.** Upload copies each Q4_K matrix as it is and
-pads each 210-byte Q6_K block to 212 bytes, so every block starts on a 4-byte
-boundary and the kernels can load 32-bit words.
+pads each 210-byte Q6_K block to 224 bytes, so every 16-byte chunk of a block
+is aligned and the kernels can load 16 bytes at a time.
 
 **Activations get one scale per 32.** The GPU quantizes activations to int8
 with one f32 scale per 32 values (llama.cpp's Q8_1 shape) and keeps
@@ -79,12 +79,12 @@ activation scale:
 sum w x = d*sc*dx * sum(q * qx)  -  dmin*m * (dx * sum(qx))
 ```
 
-**One mma per sub-block.** A Q6_K thread block computes 64 weight rows by a
-tile of 32, 64 or 80 tokens. For each 256-wide super-block it unpacks the
-weights into shared memory as int8 (q - 32), copies the matching activations
-next to them, and each of its 4 warps runs
-`mma.m16n8k32.s8` per sub-block for its 16 rows and every 8 tokens. Q6_K
-scales every 16 weights, so it uses `mma.m16n8k16` instead, one per scale.
+**One mma per scale group.** A Q6_K thread block computes 64 weight rows by a
+tile of 32, 64 or 80 tokens. For each 256-wide super-block it copies the
+weights into shared memory (see the Q6_K paragraph below), copies the matching
+activations next to them, and each of its 4 warps runs one `mma.m16n8k16.s8`
+per 16-weight scale group for its 16 rows and every 8 tokens. (A Q4_K block
+scales every 32 weights, so it runs `mma.m16n8k32.s8` per sub-block instead.)
 The int32 result goes to f32 with the two scales and, for Q4_K, the min term.
 
 **Q4_K: packed in shared memory, unpacked in registers.** Removing the staging
@@ -118,6 +118,17 @@ launch time times launches, middle value of three interleaved traces,
 logits match main on all 84 rows (`bench/checks/2026-10-13-gemm4-logits.json`).
 That the gain comes from overlapping the loads with compute is the reading
 the numbers fit; no hardware counters were collected to confirm it.
+
+**Q6_K: the same layout and prefetch.** The Q6_K kernel took the route the
+Q4_K one did. A block of 64 rows copies each row's 224 bytes (low nibbles,
+high bits, 16 int8 group scales, d) into shared memory as they are, in 16-byte
+loads; a warp rebuilds each 16-weight group's A fragment in registers
+(`_q6k_frag`: nibble, two high bits, minus 32 by an xor and a sign extension),
+and the next super-block waits in registers while the mma loop runs. Groups
+accumulate in the same order as before, so the result is unchanged. The
+padded block is 12 bytes larger than the 212-byte padding it replaces: with
+6,217,728 Q6_K blocks in LLaDA-8B Q4_K_M (output, 16 attn_v and 16 ffn_down
+tensors) that is 74.6 MB (71.2 MiB) more device memory.
 
 **Tile width per call.** Unpacking a weight tile costs the same however
 many tokens then use it, so the widest tile that saves a tile wins: a
