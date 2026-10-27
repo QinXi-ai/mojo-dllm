@@ -17,6 +17,7 @@ comptime F32Ptr = Pointer[Float32, MutAnyOrigin]
 comptime I8Ptr = Pointer[Int8, MutAnyOrigin]
 comptime U8Ptr = Pointer[UInt8, MutAnyOrigin]
 comptime I32Ptr = Pointer[Int32, MutAnyOrigin]
+comptime F64Ptr = Pointer[Float64, MutAnyOrigin]
 comptime I16Ptr = Pointer[Int16, MutAnyOrigin]
 
 
@@ -81,6 +82,9 @@ struct Bytes(Movable):
 
     def i32(self) -> I32Ptr:
         return I32Ptr(unsafe_from_address=self.addr)
+
+    def f64(self) -> F64Ptr:
+        return F64Ptr(unsafe_from_address=self.addr)
 
     def i16(self) -> I16Ptr:
         return I16Ptr(unsafe_from_address=self.addr)

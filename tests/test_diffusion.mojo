@@ -9,11 +9,12 @@ from mojo_dllm.diffusion.sampler import (
     generate,
     Rng,
     _confidence,
+    _confidence_from_stats,
     _greedy_rows,
     StepObserver,
     generate_observed,
 )
-from mojo_dllm.models.transformer import DiffusionLM
+from mojo_dllm.models.transformer import DiffusionLM, RowStats
 from mojo_dllm.sys.mem import Floats
 
 comptime FIX = "tests/fixtures/"
@@ -306,6 +307,49 @@ def test_observer_sees_dream_commits() raises:
     var rec = Recorder()
     _ = generate_observed(m, prompt, c, rec)
     assert_equal(rec.committed, 8)
+
+
+def test_confidence_from_row_statistics_matches_the_full_row() raises:
+    # The device kernel hands the sampler four numbers per row; the sampler
+    # must score the row from them exactly as the loops over the whole row do.
+    var vocab = 300
+    var row = Floats(vocab)
+    var s = UInt64(12345)
+    for v in range(vocab):
+        s = s * 6364136223846793005 + 1442695040888963407
+        row[v] = Float32(Int((s >> 33) % 2001) - 1000) / 125.0
+    row[40] = 9.0
+    row[200] = 9.0  # the first of two equal maxima wins
+    var best = 0
+    for v in range(1, vocab):
+        if row[v] > row[best]:
+            best = v
+    var st = RowStats()
+    var m = Float64(row[best])
+    var z = Float64(0)
+    var a = Float64(0)
+    var second = Float64(-1e300)
+    for v in range(vocab):
+        var e = exp(Float64(row[v]) - m)
+        z += e
+        a += e * (Float64(row[v]) - m)
+        if v != best and Float64(row[v]) > second:
+            second = Float64(row[v])
+    st.tok.append(best)
+    st.mx.append(m)
+    st.z.append(z)
+    st.second.append(second)
+    st.weighted.append(a)
+    assert_equal(best, 40)
+    var p = argmax_and_prob(row.ptr(), vocab)
+    assert_true(abs(_confidence_from_stats(st, 0, "llada") - p[1]) < 1e-12)
+    for algo in ["maskgit_plus", "topk_margin", "entropy"]:
+        var w = _confidence(row.ptr(), vocab, algo)
+        var got = _confidence_from_stats(st, 0, algo)
+        assert_true(
+            abs(got - w[1]) < 1e-9,
+            algo + ": " + String(got) + " against " + String(w[1]),
+        )
 
 
 def main() raises:
