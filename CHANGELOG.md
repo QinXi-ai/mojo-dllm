@@ -8,6 +8,27 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
+- Fused elementwise kernels on the GPU: the residual add, the RMSNorm and the
+  activation quantization run as one launch (three per layer boundary plus
+  the first norm), and `silu(g) * u` is quantized in the same launch as the
+  product. A layer goes from nine elementwise launches to four. Each fused
+  kernel evaluates the unfused kernels' f32 expressions in the same order, and
+  the GPU tests compare each against its chain bit for bit (issue #10).
+  LLaDA-8B at 148 tokens: 236.1 to 226.4 ms per forward (median of three
+  interleaved traces, `bench/profiles/2026-10-27-fuse-*`). The fused kernels
+  account for 5.7 ms of that and the rest is GEMM timing variation between
+  runs. The forward logits are identical (`bench/checks/2026-10-27-fuse-*`).
+- Greedy decoding scores each requested row on the GPU. One block per row
+  reduces its logits to the first argmax, the maximum, the sum of
+  exp(x - max), the runner-up logit and the sum of exp(x - max)(x - max); the
+  host turns those numbers into the LLaDA probability or Dream's entropy,
+  maskgit_plus and topk_margin confidence, so a step copies 36 bytes per
+  requested row instead of the logits rows. `--temperature` above 0 and
+  `--full-logits` keep the host path. Tests compare the kernel with the host
+  loops (issue #9). LLaDA-8B at 148 tokens: 250.5 to 234.3 ms per step, with the
+  forward pass unchanged (234.6 and 234.3 ms) and the forward logits identical
+  to main's (median of three interleaved traces,
+  `bench/profiles/2026-10-27-argmax-*`, `bench/checks/2026-10-27-argmax-*`).
 - Generation stops once the printed answer is final (an end-of-text token
   after a fully committed answer). The output is identical; `--no-early-stop`
   runs every step, and the harnesses pass it so comparisons stay step for

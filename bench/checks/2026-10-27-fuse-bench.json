@@ -1,0 +1,183 @@
+{
+  "date": "2026-10-27",
+  "model": "LLaDA-8B-Instruct.Q4_K_M.gguf",
+  "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU, 595.99.02",
+  "seq_len": 148,
+  "steps": 4,
+  "forward_passes": 4,
+  "method": "scripts/gpu_profile.py (nsys --trace=cuda), three interleaved rounds, base = perf-argmax(f7f1926)",
+  "versions": {
+    "base": [
+      "f7f1926"
+    ],
+    "new": [
+      "a408018"
+    ]
+  },
+  "kernel_ms_per_forward": {
+    "base": [
+      233.558,
+      230.86,
+      233.681
+    ],
+    "new": [
+      224.005,
+      224.912,
+      223.859
+    ]
+  },
+  "kernel_ms_per_forward_median": {
+    "base": 233.558,
+    "new": 224.005
+  },
+  "kernel_ms_per_forward_change_ms": -9.553,
+  "kernel_median_ms_per_forward": {
+    "base": [
+      196.093,
+      196.03,
+      196.263
+    ],
+    "new": [
+      190.317,
+      190.803,
+      190.633
+    ]
+  },
+  "kernel_median_ms_per_forward_median": {
+    "base": 196.093,
+    "new": 190.633
+  },
+  "kernel_median_ms_per_forward_change_ms": -5.46,
+  "forward_ms_measured": {
+    "base": [
+      236.07492775,
+      233.3165855,
+      236.12188225
+    ],
+    "new": [
+      226.43509325,
+      227.273313,
+      226.24807625
+    ]
+  },
+  "forward_ms_measured_median": {
+    "base": 236.075,
+    "new": 226.435
+  },
+  "forward_ms_measured_change_ms": -9.64,
+  "ms_per_step_measured": {
+    "base": [
+      236.0890795,
+      233.32951075,
+      236.1347115
+    ],
+    "new": [
+      226.448171,
+      227.28733225,
+      226.26187175
+    ]
+  },
+  "ms_per_step_measured_median": {
+    "base": 236.089,
+    "new": 226.448
+  },
+  "ms_per_step_measured_change_ms": -9.641,
+  "groups_ms_per_forward_median": {
+    "add": {
+      "base": 2.763,
+      "new": 0.0
+    },
+    "attention": {
+      "base": 8.465,
+      "new": 8.415
+    },
+    "copy_rows": {
+      "base": 0.015,
+      "new": 0.015
+    },
+    "gemm_q4k": {
+      "base": 165.389,
+      "new": 162.162
+    },
+    "gemm_q6k": {
+      "base": 43.013,
+      "new": 42.472
+    },
+    "other:mojo_dllm_gpu_kernels__add_rm6A6A6A6A6A6A": {
+      "base": 0.0,
+      "new": 4.179
+    },
+    "other:mojo_dllm_gpu_kernels__row_st6A6A6A6A6A6A": {
+      "base": 0.562,
+      "new": 0.563
+    },
+    "quantize": {
+      "base": 4.556,
+      "new": 0.769
+    },
+    "rmsnorm": {
+      "base": 2.475,
+      "new": 0.041
+    },
+    "rope": {
+      "base": 2.015,
+      "new": 2.009
+    },
+    "silu_mul": {
+      "base": 4.275,
+      "new": 3.41
+    }
+  },
+  "groups_launches_per_forward_median": {
+    "add": {
+      "base": 64.0,
+      "new": 0.0
+    },
+    "attention": {
+      "base": 32.0,
+      "new": 32.0
+    },
+    "copy_rows": {
+      "base": 2.0,
+      "new": 2.0
+    },
+    "gemm_q4k": {
+      "base": 192.0,
+      "new": 192.0
+    },
+    "gemm_q6k": {
+      "base": 33.0,
+      "new": 33.0
+    },
+    "other:mojo_dllm_gpu_kernels__add_rm6A6A6A6A6A6A": {
+      "base": 0.0,
+      "new": 64.0
+    },
+    "other:mojo_dllm_gpu_kernels__row_st6A6A6A6A6A6A": {
+      "base": 1.0,
+      "new": 1.0
+    },
+    "quantize": {
+      "base": 129.0,
+      "new": 32.0
+    },
+    "rmsnorm": {
+      "base": 65.0,
+      "new": 1.0
+    },
+    "rope": {
+      "base": 64.0,
+      "new": 64.0
+    },
+    "silu_mul": {
+      "base": 32.0,
+      "new": 32.0
+    }
+  },
+  "definitions": {
+    "kernel_ms_per_forward": "sum of every kernel instance's device time, per forward pass",
+    "kernel_median_ms_per_forward": "for each kernel, its median instance time times its launches, summed, per forward pass",
+    "forward_ms_measured": "the model's own timer around one forward pass, per pass (tm.total_ns / forward passes)",
+    "ms_per_step_measured": "generate seconds over forward passes"
+  }
+}

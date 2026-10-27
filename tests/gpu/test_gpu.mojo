@@ -20,6 +20,9 @@ from mojo_dllm.gpu.kernels import (
     add_gpu,
     add_bias_gpu,
     quantize_gpu,
+    rmsnorm_quantize_gpu,
+    add_rmsnorm_quantize_gpu,
+    silu_mul_quantize_gpu,
     gemm_gpu,
     staged_matrix_bytes,
     dev_f32,
@@ -27,6 +30,9 @@ from mojo_dllm.gpu.kernels import (
     stage_matrix,
     dev_i8,
     dev_i32,
+    dev_f64,
+    row_stats_gpu,
+    RS_FIELDS,
     mma_tile_gpu,
     _pick_bn,
 )
@@ -40,7 +46,14 @@ from mojo_dllm.kernels.ops import (
     add_inplace,
     add_bias,
 )
-from mojo_dllm.models.transformer import DiffusionLM
+from mojo_dllm.diffusion.sampler import (
+    GenConfig,
+    _confidence,
+    _confidence_from_stats,
+    argmax_and_prob,
+    generate,
+)
+from mojo_dllm.models.transformer import DiffusionLM, RowStats
 from mojo_dllm.quant.kquants import dequant_row
 from mojo_dllm.sys.mem import F32Ptr, I8Ptr, I32Ptr, U8Ptr, Floats, Bytes
 from mojo_dllm.sys.mmap import Mapping
@@ -301,6 +314,114 @@ def test_quantize_matches_formula() raises:
     _check_quantize(37, 512)
 
 
+def _same_quant(
+    ctx: DeviceContext,
+    a: GpuQActs,
+    b: GpuQActs,
+    rows: Int,
+    K: Int,
+    what: String,
+) raises:
+    """Two quantized activation sets are identical: values, scales and sums."""
+    var qa = Bytes(rows * K)
+    var qb = Bytes(rows * K)
+    ctx.enqueue_copy(qa.i8(), a.q.create_sub_buffer[DType.int8](0, qa.size))
+    ctx.enqueue_copy(qb.i8(), b.q.create_sub_buffer[DType.int8](0, qb.size))
+    var nb = rows * K // 32
+    var da = _down(ctx, a.d, nb)
+    var db = _down(ctx, b.d, nb)
+    var sa = _down(ctx, a.s, nb)
+    var sb = _down(ctx, b.s, nb)
+    for i in range(rows * K):
+        assert_equal(
+            Int(qa.i8()[unsafe_offset=i]),
+            Int(qb.i8()[unsafe_offset=i]),
+            what + ": value " + String(i),
+        )
+    for i in range(nb):
+        assert_equal(da[i], db[i], what + ": scale " + String(i))
+        assert_equal(sa[i], sb[i], what + ": sum " + String(i))
+
+
+def _check_rmsnorm_quantize(rows: Int, K: Int) raises:
+    var ctx = DeviceContext()
+    var x = Floats(rows * K)
+    var w = Floats(K)
+    _fill(x, 31)
+    _fill(w, 32)
+    var dw = _up(ctx, w)
+    var dx = _up(ctx, x)
+    var xn = ctx.enqueue_create_buffer[DType.float32](rows * K)
+    var chain = GpuQActs(ctx, rows, K)
+    rmsnorm_gpu(ctx, dev_f32(dx), dev_f32(dw), dev_f32(xn), rows, K, 1e-5)
+    quantize_gpu(ctx, dev_f32(xn), rows, K, chain)
+    var fused = GpuQActs(ctx, rows, K)
+    rmsnorm_quantize_gpu(ctx, dev_f32(dx), dev_f32(dw), fused, rows, K, 1e-5)
+    _same_quant(ctx, chain, fused, rows, K, "rmsnorm+quantize")
+
+
+def test_fused_rmsnorm_quantize_matches_chain() raises:
+    _check_rmsnorm_quantize(4, 1024)
+    # Activation widths are multiples of 256 (GpuQActs), the block size, so the
+    # quantize loop always runs whole passes: 768 takes three of them.
+    _check_rmsnorm_quantize(5, 768)
+
+
+def _check_add_rmsnorm_quantize(rows: Int, K: Int) raises:
+    var ctx = DeviceContext()
+    var x = Floats(rows * K)
+    var h = Floats(rows * K)
+    var w = Floats(K)
+    _fill(x, 41)
+    _fill(h, 42)
+    _fill(w, 43)
+    var dw = _up(ctx, w)
+    var dh = _up(ctx, h)
+    var x1 = _up(ctx, x)
+    var xn = ctx.enqueue_create_buffer[DType.float32](rows * K)
+    var chain = GpuQActs(ctx, rows, K)
+    add_gpu(ctx, dev_f32(x1), dev_f32(dh), rows * K)
+    rmsnorm_gpu(ctx, dev_f32(x1), dev_f32(dw), dev_f32(xn), rows, K, 1e-5)
+    quantize_gpu(ctx, dev_f32(xn), rows, K, chain)
+    var x2 = _up(ctx, x)
+    var fused = GpuQActs(ctx, rows, K)
+    add_rmsnorm_quantize_gpu(
+        ctx, dev_f32(x2), dev_f32(dh), dev_f32(dw), fused, rows, K, 1e-5
+    )
+    _same_quant(ctx, chain, fused, rows, K, "add+rmsnorm+quantize")
+    var a = _down(ctx, x1, rows * K)
+    var b = _down(ctx, x2, rows * K)
+    for i in range(rows * K):
+        assert_equal(a[i], b[i], "residual " + String(i))
+
+
+def test_fused_add_rmsnorm_quantize_matches_chain() raises:
+    _check_add_rmsnorm_quantize(4, 1024)
+    _check_add_rmsnorm_quantize(5, 768)
+
+
+def test_fused_silu_mul_quantize_matches_chain() raises:
+    var ctx = DeviceContext()
+    var rows = 3
+    var K = 768
+    var g = Floats(rows * K)
+    var u = Floats(rows * K)
+    _fill(g, 51)
+    _fill(u, 52)
+    var du = _up(ctx, u)
+    var g1 = _up(ctx, g)
+    var chain = GpuQActs(ctx, rows, K)
+    silu_mul_gpu(ctx, dev_f32(g1), dev_f32(du), rows * K)
+    quantize_gpu(ctx, dev_f32(g1), rows, K, chain)
+    var g2 = _up(ctx, g)
+    var fused = GpuQActs(ctx, rows, K)
+    silu_mul_quantize_gpu(ctx, dev_f32(g2), dev_f32(du), fused, rows, K)
+    _same_quant(ctx, chain, fused, rows, K, "silu_mul+quantize")
+    var left = _down(ctx, g2, rows * K)
+    for i in range(rows * K):
+        assert_equal(left[i], g[i], "g untouched " + String(i))
+
+
 def _check_gemm(name: String, n_tokens: Int, rows: Int = 0) raises:
     """GPU int8 GEMM against an f32 GEMM over the reference dequantization."""
     var ctx = DeviceContext()
@@ -459,6 +580,101 @@ def test_forward_subset_rows_match_full() raises:
                 ),
             )
     assert_true(worst < 1e-3, "subset rows differ by " + String(worst))
+
+
+def _close(got: Float64, want: Float64, rel: Float64, floor: Float64) -> Bool:
+    return abs(got - want) <= rel * abs(want) + floor
+
+
+def _check_row_stats(vocab: Int, n_rows: Int, seed: Int) raises:
+    """The device reductions give the host's token and confidences, row by row.
+
+    The grid of values _fill draws from repeats, so every row holds its maximum
+    several times, and row 1 gets two extra copies of a larger value: the
+    first index must win a tie.
+    """
+    var ctx = DeviceContext()
+    var x = Floats(n_rows * vocab)
+    _fill(x, seed)
+    x[vocab + 5] = 9.0
+    x[vocab + vocab // 2] = 9.0
+    var dx = _up(ctx, x)
+    var tok = ctx.enqueue_create_buffer[DType.int32](n_rows)
+    var val = ctx.enqueue_create_buffer[DType.float64](RS_FIELDS * n_rows)
+    row_stats_gpu(ctx, dev_f32(dx), n_rows, vocab, dev_i32(tok), dev_f64(val))
+    var htok = Bytes(4 * n_rows)
+    var hval = Bytes(8 * RS_FIELDS * n_rows)
+    ctx.enqueue_copy(htok.i32(), tok)
+    ctx.enqueue_copy(hval.f64(), val)
+    ctx.synchronize()
+    var st = RowStats()
+    for j in range(n_rows):
+        st.tok.append(Int(htok.i32()[unsafe_offset=j]))
+        st.mx.append(hval.f64()[unsafe_offset=RS_FIELDS * j])
+        st.z.append(hval.f64()[unsafe_offset=RS_FIELDS * j + 1])
+        st.second.append(hval.f64()[unsafe_offset=RS_FIELDS * j + 2])
+        st.weighted.append(hval.f64()[unsafe_offset=RS_FIELDS * j + 3])
+    assert_equal(st.tok[1], 5)
+    for j in range(n_rows):
+        var row = x.ptr().unsafe_offset(j * vocab)
+        var want = argmax_and_prob(row, vocab)
+        var at = " (row " + String(j) + ", vocab " + String(vocab) + ")"
+        assert_equal(st.tok[j], want[0], "argmax" + at)
+        assert_true(
+            _close(_confidence_from_stats(st, j, "llada"), want[1], 1e-5, 0.0),
+            "probability" + at,
+        )
+        for algo in ["maskgit_plus", "topk_margin", "entropy"]:
+            var w = _confidence(row, vocab, algo)
+            assert_equal(st.tok[j], w[0], algo + " token" + at)
+            assert_true(
+                _close(_confidence_from_stats(st, j, algo), w[1], 1e-5, 1e-5),
+                algo + " confidence" + at,
+            )
+
+
+def test_row_stats_match_host_small_vocab() raises:
+    _check_row_stats(1000, 5, 3)
+
+
+def test_row_stats_match_host_full_vocab() raises:
+    _check_row_stats(126464, 3, 7)
+
+
+def test_forward_stats_match_forward_logits() raises:
+    var toks: List[Int] = [5, 17, 300, 7, 9, 42, 100, 7]
+    var rows: List[Int] = [1, 4, 7]
+    var m = GpuDiffusionLM(FIX + "tiny-llada.gguf", max_tokens=16)
+    var lg = Floats(len(rows) * 512)
+    m.forward(toks, rows, lg.ptr())
+    var st = RowStats()
+    m.forward_stats(toks, rows, st)
+    assert_equal(len(st.tok), len(rows))
+    for j in range(len(rows)):
+        var want = argmax_and_prob(lg.ptr().unsafe_offset(j * 512), 512)
+        assert_equal(st.tok[j], want[0])
+        assert_true(
+            _close(_confidence_from_stats(st, j, "llada"), want[1], 1e-5, 0.0),
+            "probability of row " + String(j),
+        )
+
+
+def test_generation_with_device_stats_matches_host_scoring() raises:
+    var m = GpuDiffusionLM(FIX + "tiny-llada.gguf", max_tokens=16)
+    var prompt: List[Int] = [5, 17, 300]
+    var c = GenConfig()
+    c.gen_length = 8
+    c.block_length = 4
+    c.steps = 4
+    c.mask_id = 511
+    var device = generate(m, prompt, c)
+    # full_logits copies every row to the host and scores it there.
+    var h = c.copy()
+    h.full_logits = True
+    var host = generate(m, prompt, h)
+    assert_equal(len(device.tokens), len(host.tokens))
+    for i in range(len(host.tokens)):
+        assert_equal(device.tokens[i], host.tokens[i], "token " + String(i))
 
 
 def main() raises:

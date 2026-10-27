@@ -146,6 +146,34 @@ and 17 floats for the same reason.
 `tests/gpu/test_gpu.mojo` checks the fragment layout against a CPU matmul
 on random int8 matrices, and the whole kernel against an f64 GEMM.
 
+**Row statistics on the device.** A greedy step needs, per masked row, the
+argmax and a confidence. Copying the logits to the host (32 rows of 126,464
+floats for a 32-token block) and looping over them there is the largest piece
+of a step outside the forward pass. One block per row now reads its logits
+twice: the first pass finds the first index of the maximum (a tie goes to the
+smaller index, as the host loop picks it), the second accumulates, in f64,
+the sum of exp(x - max), the sum of exp(x - max)(x - max) and the largest
+logit at any other index. The sampler finishes from those four numbers:
+p = 1 / z for LLaDA and maskgit_plus, p minus the runner-up's probability
+for topk_margin, and sum e (x - max) / z - log z for Dream's entropy.
+The exponentials are f32, so a confidence differs from the host's f64 loop in
+the sixth digit; tests bound it at 1e-5 relative.
+
+**Fused elementwise kernels.** The quantized GEMMs want int8 activations, so
+each norm and the FFN activation end in a quantize. Run separately, a layer
+wrote and re-read the normalized rows and the product of the gate and up
+projections through global memory. Three kernels remove that traffic:
+`add_rmsnorm_quantize` adds the projection output into the residual stream,
+normalizes the sum and quantizes it; `rmsnorm_quantize` does the same for
+layer 0, whose input has no add; `silu_mul_quantize` quantizes silu(g) * u
+without storing it. The norm kernels give thread t the values t, t + 256, ...
+so a warp holds 32 consecutive values at each step, which is one
+quantization block, and the quantize step is the same `_quantize_lane` code
+the plain kernel runs. The float expressions and their order match the
+unfused kernels', so the fused output is identical to the chain's, which the
+tests assert exactly. The attention output still goes through the plain
+quantize kernel.
+
 **Attention on f16 tensor cores.** Each warp owns 16 queries and walks the
 keys 32 at a time. Q is scaled by 1/sqrt(d) and held in registers as f16
 fragments; K is staged row-major and V transposed, both as f16, so every

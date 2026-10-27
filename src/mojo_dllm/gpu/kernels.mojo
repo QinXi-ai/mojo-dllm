@@ -30,7 +30,7 @@ from max.gpu.primitives.warp import (
 )
 
 from mojo_dllm.formats.gguf import GGML_Q4_K, GGML_Q6_K, ggml_type_name
-from mojo_dllm.sys.mem import F32Ptr, I8Ptr, I32Ptr, U8Ptr
+from mojo_dllm.sys.mem import F32Ptr, F64Ptr, I8Ptr, I32Ptr, U8Ptr
 
 comptime QK = 32
 """Activation values per int8 scale."""
@@ -40,6 +40,9 @@ comptime Q6K_STAGED = 224
 comptime NT = 256
 comptime SharedF32 = Pointer[
     Float32, MutUntrackedOrigin, address_space=AddressSpace.SHARED
+]
+comptime SharedF64 = Pointer[
+    Float64, MutUntrackedOrigin, address_space=AddressSpace.SHARED
 ]
 
 
@@ -62,6 +65,11 @@ def dev_i8(b: DeviceBuffer[DType.int8]) -> I8Ptr:
 @always_inline
 def dev_i32(b: DeviceBuffer[DType.int32]) -> I32Ptr:
     return I32Ptr(unsafe_from_address=Int(b.unsafe_ptr()))
+
+
+@always_inline
+def dev_f64(b: DeviceBuffer[DType.float64]) -> F64Ptr:
+    return F64Ptr(unsafe_from_address=Int(b.unsafe_ptr()))
 
 
 @always_inline
@@ -443,6 +451,142 @@ def attention_gpu(
         )
 
 
+# ------------------------------------------------------------- row statistics
+
+comptime RS_THREADS = 256
+"""Threads per block of the row-statistics kernel (a power of two)."""
+comptime RS_FIELDS = 4
+"""f64 values written per row: max, sum, runner-up, weighted sum."""
+
+
+@always_inline
+def _block_sum_f64(red: SharedF64, v: Float64, th: Int) -> Float64:
+    """Sum over RS_THREADS threads; every thread gets the total."""
+    red[unsafe_offset=th] = v
+    barrier()
+    var s = RS_THREADS // 2
+    while s > 0:
+        if th < s:
+            red[unsafe_offset=th] = (
+                red[unsafe_offset=th] + red[unsafe_offset=th + s]
+            )
+        barrier()
+        s //= 2
+    var r = red[unsafe_offset=0]
+    barrier()
+    return r
+
+
+@always_inline
+def _block_max_f64(red: SharedF64, v: Float64, th: Int) -> Float64:
+    """Max over RS_THREADS threads; every thread gets the result."""
+    red[unsafe_offset=th] = v
+    barrier()
+    var s = RS_THREADS // 2
+    while s > 0:
+        if th < s:
+            red[unsafe_offset=th] = max(
+                red[unsafe_offset=th], red[unsafe_offset=th + s]
+            )
+        barrier()
+        s //= 2
+    var r = red[unsafe_offset=0]
+    barrier()
+    return r
+
+
+def _row_stats_kernel(logits: F32Ptr, vocab: Int32, tok: I32Ptr, stats: F64Ptr):
+    """Reduce one logits row (block b reads row b) to what the samplers score.
+
+    tok[b] is the first index of the maximum, as the host argmax picks it.
+    stats[4b ..] holds, with m the maximum and e_v = exp(logit_v - m):
+    m, sum e_v, the largest logit at any index other than tok[b], and
+    sum e_v (logit_v - m). Sums are f64; the exponentials are f32.
+    """
+    var sv = unsafe_stack_allocation[
+        RS_THREADS, Float32, address_space=AddressSpace.SHARED
+    ]()
+    var si = unsafe_stack_allocation[
+        RS_THREADS, Int32, address_space=AddressSpace.SHARED
+    ]()
+    var red = unsafe_stack_allocation[
+        RS_THREADS, Float64, address_space=AddressSpace.SHARED
+    ]()
+    var th = Int(thread_idx.x)
+    var n = Int(vocab)
+    var row = logits.unsafe_offset(Int(block_idx.x) * n)
+    # First index of the maximum: a larger value wins, a tie goes to the
+    # smaller index.
+    var bv = Float32.MIN
+    var bi = Int32.MAX
+    for v in range(th, n, RS_THREADS):
+        var x = row[unsafe_offset=v]
+        if x > bv:
+            bv = x
+            bi = Int32(v)
+    sv[unsafe_offset=th] = bv
+    si[unsafe_offset=th] = bi
+    barrier()
+    var s = RS_THREADS // 2
+    while s > 0:
+        if th < s:
+            var v2 = sv[unsafe_offset=th + s]
+            var i2 = si[unsafe_offset=th + s]
+            var v1 = sv[unsafe_offset=th]
+            var i1 = si[unsafe_offset=th]
+            if v2 > v1 or (v2 == v1 and i2 < i1):
+                sv[unsafe_offset=th] = v2
+                si[unsafe_offset=th] = i2
+        barrier()
+        s //= 2
+    var m = sv[unsafe_offset=0]
+    var best = Int(si[unsafe_offset=0])
+    if best == Int(Int32.MAX):
+        # No value beat the sentinel (a row of NaN): the host loop's answer.
+        best = 0
+    barrier()
+    var z = Float64(0)
+    var a = Float64(0)
+    var second = Float64(-1e300)
+    for v in range(th, n, RS_THREADS):
+        var x = row[unsafe_offset=v]
+        var dx = x - m
+        var e = Float64(exp(dx))
+        z += e
+        a += e * Float64(dx)
+        if v != best:
+            second = max(second, Float64(x))
+    z = _block_sum_f64(red, z, th)
+    a = _block_sum_f64(red, a, th)
+    second = _block_max_f64(red, second, th)
+    if th == 0:
+        var b = Int(block_idx.x)
+        tok[unsafe_offset=b] = Int32(best)
+        stats[unsafe_offset=RS_FIELDS * b] = Float64(m)
+        stats[unsafe_offset=RS_FIELDS * b + 1] = z
+        stats[unsafe_offset=RS_FIELDS * b + 2] = second
+        stats[unsafe_offset=RS_FIELDS * b + 3] = a
+
+
+def row_stats_gpu(
+    ctx: DeviceContext,
+    logits: F32Ptr,
+    n_rows: Int,
+    vocab: Int,
+    tok: I32Ptr,
+    stats: F64Ptr,
+) raises:
+    """Greedy token and softmax statistics of each of n_rows logits rows."""
+    ctx.enqueue_function[_row_stats_kernel](
+        logits,
+        Int32(vocab),
+        tok,
+        stats,
+        grid_dim=n_rows,
+        block_dim=RS_THREADS,
+    )
+
+
 # ---------------------------------------------------------------- elementwise
 
 
@@ -544,18 +688,17 @@ struct GpuQActs(Movable):
         self.s = ctx.enqueue_create_buffer[DType.float32](max_tokens * K // QK)
 
 
-def _quantize_kernel(
-    x: F32Ptr, q: I8Ptr, ds: F32Ptr, ss: F32Ptr, n_blocks: Int32
+@always_inline
+def _quantize_lane(
+    v: Float32, q: I8Ptr, ds: F32Ptr, ss: F32Ptr, i: Int, b: Int
 ):
-    # One warp per 32-value block, one value per lane, so loads and stores
-    # are coalesced. max and an integer sum do not depend on the order of
-    # the reduction, so the result is the same as a sequential loop's.
-    # QK is 32, the warp width.
-    var b = Int(block_idx.x) * (NT // 32) + Int(warp_id())
-    if b >= Int(n_blocks):
-        return
-    var i = b * QK + Int(lane_id())
-    var v = x[unsafe_offset=i]
+    """Lane `lane_id()` of a warp quantizes value i of the 32-value block b.
+
+    All 32 lanes of the warp call it together: max and an integer sum do not
+    depend on the order of the reduction, so the result is the same as a
+    sequential loop's. The plain and the fused kernels share this code, which
+    is what keeps a fused kernel's output identical to the chain it replaces.
+    """
     var amax = warp_max(abs(v))
     var d = amax / 127.0
     var inv = Float32(0) if amax == 0 else 127.0 / amax
@@ -567,6 +710,18 @@ def _quantize_kernel(
         ss[unsafe_offset=b] = d * Float32(sum)
 
 
+def _quantize_kernel(
+    x: F32Ptr, q: I8Ptr, ds: F32Ptr, ss: F32Ptr, n_blocks: Int32
+):
+    # One warp per 32-value block, one value per lane, so loads and stores
+    # are coalesced. QK is 32, the warp width.
+    var b = Int(block_idx.x) * (NT // 32) + Int(warp_id())
+    if b >= Int(n_blocks):
+        return
+    var i = b * QK + Int(lane_id())
+    _quantize_lane(x[unsafe_offset=i], q, ds, ss, i, b)
+
+
 def quantize_gpu(
     ctx: DeviceContext, x: F32Ptr, n_tokens: Int, K: Int, qa: GpuQActs
 ) raises:
@@ -575,6 +730,184 @@ def quantize_gpu(
     var nb = n_tokens * K // QK
     ctx.enqueue_function[_quantize_kernel](
         x,
+        dev_i8(qa.q),
+        dev_f32(qa.d),
+        dev_f32(qa.s),
+        Int32(nb),
+        grid_dim=_cdiv(nb, NT // 32),
+        block_dim=NT,
+    )
+
+
+# ------------------------------------------------- fused elementwise kernels
+#
+# Each fused kernel evaluates the same f32 expressions, in the same order, as
+# the kernels it replaces, so its output matches the chain bit for bit
+# (tests/gpu/test_gpu.mojo compares them exactly).
+
+
+def _norm_quantize_pass(
+    row: F32Ptr,
+    w: F32Ptr,
+    inv: Float32,
+    q: I8Ptr,
+    ds: F32Ptr,
+    ss: F32Ptr,
+    d: Int,
+    row_off: Int,
+):
+    """Quantize row * inv * w. Thread t takes values t, t + NT, ...: a warp
+    holds 32 consecutive values at each step, which is one quantization block.
+    d is a multiple of 32, so a warp is either inside the row or outside it.
+    """
+    var k = 0
+    while k < d:
+        var base = k + Int(warp_id()) * 32
+        if base < d:
+            var i = base + Int(lane_id())
+            var v = row[unsafe_offset=i] * inv * w[unsafe_offset=i]
+            _quantize_lane(v, q, ds, ss, row_off + i, (row_off + base) // 32)
+        k += NT
+
+
+def _rmsnorm_quantize_kernel(
+    x: F32Ptr,
+    w: F32Ptr,
+    q: I8Ptr,
+    ds: F32Ptr,
+    ss: F32Ptr,
+    dim: Int32,
+    eps: Float32,
+):
+    var red = unsafe_stack_allocation[
+        NT // 32, Float32, address_space=AddressSpace.SHARED
+    ]()
+    var d = Int(dim)
+    var row_off = Int(block_idx.x) * d
+    var row = x.unsafe_offset(row_off)
+    var sq = Float32(0)
+    var i = Int(thread_idx.x)
+    while i < d:
+        var v = row[unsafe_offset=i]
+        sq += v * v
+        i += NT
+    var total = _block_sum(sq, red)
+    var inv = 1.0 / sqrt(total / Float32(d) + eps)
+    _norm_quantize_pass(row, w, inv, q, ds, ss, d, row_off)
+
+
+def _add_rmsnorm_quantize_kernel(
+    x: F32Ptr,
+    h: F32Ptr,
+    w: F32Ptr,
+    q: I8Ptr,
+    ds: F32Ptr,
+    ss: F32Ptr,
+    dim: Int32,
+    eps: Float32,
+):
+    var red = unsafe_stack_allocation[
+        NT // 32, Float32, address_space=AddressSpace.SHARED
+    ]()
+    var d = Int(dim)
+    var row_off = Int(block_idx.x) * d
+    var row = x.unsafe_offset(row_off)
+    var hrow = h.unsafe_offset(row_off)
+    var sq = Float32(0)
+    var i = Int(thread_idx.x)
+    while i < d:
+        var v = row[unsafe_offset=i] + hrow[unsafe_offset=i]
+        row[unsafe_offset=i] = v
+        sq += v * v
+        i += NT
+    # The second pass reads back the values this same thread wrote.
+    var total = _block_sum(sq, red)
+    var inv = 1.0 / sqrt(total / Float32(d) + eps)
+    _norm_quantize_pass(row, w, inv, q, ds, ss, d, row_off)
+
+
+def _silu_mul_quantize_kernel(
+    g: F32Ptr, u: F32Ptr, q: I8Ptr, ds: F32Ptr, ss: F32Ptr, n_blocks: Int32
+):
+    var b = Int(block_idx.x) * (NT // 32) + Int(warp_id())
+    if b >= Int(n_blocks):
+        return
+    var i = b * QK + Int(lane_id())
+    var a = g[unsafe_offset=i]
+    _quantize_lane(a / (1.0 + exp(-a)) * u[unsafe_offset=i], q, ds, ss, i, b)
+
+
+def _check_quant_shape(qa: GpuQActs, n_tokens: Int, K: Int) raises:
+    if K != qa.K or n_tokens > qa.max_tokens or K % QK != 0:
+        raise Error("activation buffer is the wrong shape")
+
+
+def rmsnorm_quantize_gpu(
+    ctx: DeviceContext,
+    x: F32Ptr,
+    w: F32Ptr,
+    qa: GpuQActs,
+    rows: Int,
+    dim: Int,
+    eps: Float32,
+) raises:
+    """quantize(rmsnorm(x)) in one launch; the normalized f32 rows are not
+    stored."""
+    _check_quant_shape(qa, rows, dim)
+    ctx.enqueue_function[_rmsnorm_quantize_kernel](
+        x,
+        w,
+        dev_i8(qa.q),
+        dev_f32(qa.d),
+        dev_f32(qa.s),
+        Int32(dim),
+        eps,
+        grid_dim=rows,
+        block_dim=NT,
+    )
+
+
+def add_rmsnorm_quantize_gpu(
+    ctx: DeviceContext,
+    x: F32Ptr,
+    h: F32Ptr,
+    w: F32Ptr,
+    qa: GpuQActs,
+    rows: Int,
+    dim: Int,
+    eps: Float32,
+) raises:
+    """x += h, then quantize(rmsnorm(x)), in one launch. x keeps the sum (it
+    is the residual stream); the normalized f32 rows are not stored."""
+    _check_quant_shape(qa, rows, dim)
+    ctx.enqueue_function[_add_rmsnorm_quantize_kernel](
+        x,
+        h,
+        w,
+        dev_i8(qa.q),
+        dev_f32(qa.d),
+        dev_f32(qa.s),
+        Int32(dim),
+        eps,
+        grid_dim=rows,
+        block_dim=NT,
+    )
+
+
+def silu_mul_quantize_gpu(
+    ctx: DeviceContext,
+    g: F32Ptr,
+    u: F32Ptr,
+    qa: GpuQActs,
+    rows: Int,
+    dim: Int,
+) raises:
+    """quantize(silu(g) * u) in one launch; g and u are left as they were."""
+    _check_quant_shape(qa, rows, dim)
+    var nb = rows * dim // QK
+    ctx.enqueue_function[_silu_mul_quantize_kernel](
+        g,
+        u,
         dev_i8(qa.q),
         dev_f32(qa.d),
         dev_f32(qa.s),
