@@ -788,5 +788,29 @@ def test_generation_with_device_stats_matches_host_scoring() raises:
         assert_equal(device.tokens[i], host.tokens[i], "token " + String(i))
 
 
+def test_dual_cache_generation_on_the_host_logits_path() raises:
+    # One step per block makes every pass a full refresh, so the cached run
+    # (forward_window, logits on the host) matches the uncached run (device
+    # row statistics). The sampler must not hand forward_window the one-float
+    # logits buffer that the statistics path allocates.
+    var prompt: List[Int] = [5, 17, 300]
+    var c = GenConfig()
+    c.gen_length = 8
+    c.block_length = 4
+    c.steps = 2
+    c.mask_id = 511
+    var plain = GpuDiffusionLM(FIX + "tiny-llada.gguf", max_tokens=16)
+    var a = generate(plain, prompt, c)
+    var cached = GpuDiffusionLM(
+        FIX + "tiny-llada.gguf", max_tokens=16, kv_cache=True
+    )
+    c.dual_cache = True
+    var b = generate(cached, prompt, c)
+    assert_equal(a.forward_passes, b.forward_passes)
+    assert_equal(len(a.tokens), len(b.tokens))
+    for i in range(len(a.tokens)):
+        assert_equal(a.tokens[i], b.tokens[i], "token " + String(i))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
