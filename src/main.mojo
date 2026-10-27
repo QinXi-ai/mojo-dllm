@@ -471,24 +471,25 @@ def _logits[
     )
 
 
+def boolean_flags() -> List[String]:
+    return [
+        "verbose",
+        "full-logits",
+        "no-chat",
+        "dump-step-stats",
+        "json",
+        "visual",
+        "no-early-stop",
+        "dual-cache",
+    ]
+
+
 def main():
     var raw = List[String]()
     for s in argv():
         raw.append(String(s))
     try:
-        var a = Args(
-            raw,
-            [
-                "verbose",
-                "full-logits",
-                "no-chat",
-                "dump-step-stats",
-                "json",
-                "visual",
-                "no-early-stop",
-                "dual-cache",
-            ],
-        )
+        var a = Args(raw, boolean_flags())
         if a.command == "run":
             cmd_run(a)
         elif a.command == "tokenize":

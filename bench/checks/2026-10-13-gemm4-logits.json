@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-13",
+  "model": "LLaDA-8B-Instruct.Q4_K_M.gguf",
+  "rows": 84,
+  "prompt_rows": 20,
+  "method": "logits for every row of the prompt plus masked tokens; per-row cosine against the base checkout's f32 CPU run",
+  "base": {
+    "version": "56d0407",
+    "median_cosine": 0.9998189059141759,
+    "min_cosine": 0.9920424592674002,
+    "masked_rows_min_cosine": 0.9994402108249428,
+    "argmax_agree_with_cpu": 77
+  },
+  "new": {
+    "version": "1d772c2",
+    "median_cosine": 0.9998189059141759,
+    "min_cosine": 0.9920424592674002,
+    "masked_rows_min_cosine": 0.9994402108249428,
+    "argmax_agree_with_cpu": 77
+  },
+  "base_vs_new": {
+    "median_cosine": 1.0,
+    "min_cosine": 1.0,
+    "argmax_agree": 84
+  }
+}

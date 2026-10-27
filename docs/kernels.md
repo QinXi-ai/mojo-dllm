@@ -65,8 +65,8 @@ these tests; that mutation check runs before changes to this file land.
 with a layout chosen for tensor cores instead of AVX registers.
 
 **Weights stay in GGUF blocks.** Upload copies each Q4_K matrix as it is and
-pads each 210-byte Q6_K block to 212 bytes, so every block starts on a 4-byte
-boundary and the kernels can load 32-bit words.
+pads each 210-byte Q6_K block to 224 bytes, so every 16-byte chunk of a block
+is aligned and the kernels can load 16 bytes at a time.
 
 **Activations get one scale per 32.** The GPU quantizes activations to int8
 with one f32 scale per 32 values (llama.cpp's Q8_1 shape) and keeps
@@ -79,12 +79,12 @@ activation scale:
 sum w x = d*sc*dx * sum(q * qx)  -  dmin*m * (dx * sum(qx))
 ```
 
-**One mma per sub-block.** A Q6_K thread block computes 64 weight rows by a
-tile of 32, 64 or 80 tokens. For each 256-wide super-block it unpacks the
-weights into shared memory as int8 (q - 32), copies the matching activations
-next to them, and each of its 4 warps runs
-`mma.m16n8k32.s8` per sub-block for its 16 rows and every 8 tokens. Q6_K
-scales every 16 weights, so it uses `mma.m16n8k16` instead, one per scale.
+**One mma per scale group.** A Q6_K thread block computes 64 weight rows by a
+tile of 32, 64 or 80 tokens. For each 256-wide super-block it copies the
+weights into shared memory (see the Q6_K paragraph below), copies the matching
+activations next to them, and each of its 4 warps runs one `mma.m16n8k16.s8`
+per 16-weight scale group for its 16 rows and every 8 tokens. (A Q4_K block
+scales every 32 weights, so it runs `mma.m16n8k32.s8` per sub-block instead.)
 The int32 result goes to f32 with the two scales and, for Q4_K, the min term.
 
 **Q4_K: packed in shared memory, unpacked in registers.** Removing the staging
@@ -102,6 +102,34 @@ warps in the same 48 KiB, which halves the activation copies per output. The
 arithmetic is unchanged, so the logits are too
 (`bench/checks/2026-10-13-gemm3-logits.json`).
 
+**Prefetching the next super-block.** On the kernel before the packed layout,
+removing staging saved about 120 ms of the GEMM and removing the mma 4 to
+7 ms, both measured against the integer-accumulation variant
+(`bench/checks/2026-10-13-gemm-cost-split.json`). The packed layout (128-row
+blocks) took that harness from 258.7 to 215.1 ms without a breakdown of the
+staging share. The loop still copied a super-block, waited at a barrier, and
+only then computed. Now each thread
+reads super-block b + 1 from global memory into registers (weights,
+activation bytes and activation scales) before the mma loop of b, and stores
+it to shared memory at the top of the next iteration, after the barrier that
+ends b. The Q4_K GEMM went from 148.8 to 87.2 ms per forward (median
+launch time times launches, middle value of three interleaved traces,
+`bench/profiles/2026-10-13-gemm4-*`), and the
+logits match main on all 84 rows (`bench/checks/2026-10-13-gemm4-logits.json`).
+That the gain comes from overlapping the loads with compute is the reading
+the numbers fit; no hardware counters were collected to confirm it.
+
+**Q6_K: the same layout and prefetch.** The Q6_K kernel took the route the
+Q4_K one did. A block of 64 rows copies each row's 224 bytes (low nibbles,
+high bits, 16 int8 group scales, d) into shared memory as they are, in 16-byte
+loads; a warp rebuilds each 16-weight group's A fragment in registers
+(`_q6k_frag`: nibble, two high bits, minus 32 by an xor and a sign extension),
+and the next super-block waits in registers while the mma loop runs. Groups
+accumulate in the same order as before, so the result is unchanged. The
+padded block is 12 bytes larger than the 212-byte padding it replaces: with
+6,217,728 Q6_K blocks in LLaDA-8B Q4_K_M (output, 16 attn_v and 16 ffn_down
+tensors) that is 74.6 MB (71.2 MiB) more device memory.
+
 **Tile width per call.** Unpacking a weight tile costs the same however
 many tokens then use it, so the widest tile that saves a tile wins: a
 148-token canvas runs two 80-wide tiles rather than five 32-wide ones, and
@@ -117,6 +145,34 @@ folds after an mma is one 128-bit load, and the scale rows are padded to 9
 and 17 floats for the same reason.
 `tests/gpu/test_gpu.mojo` checks the fragment layout against a CPU matmul
 on random int8 matrices, and the whole kernel against an f64 GEMM.
+
+**Row statistics on the device.** A greedy step needs, per masked row, the
+argmax and a confidence. Copying the logits to the host (32 rows of 126,464
+floats for a 32-token block) and looping over them there is the largest piece
+of a step outside the forward pass. One block per row now reads its logits
+twice: the first pass finds the first index of the maximum (a tie goes to the
+smaller index, as the host loop picks it), the second accumulates, in f64,
+the sum of exp(x - max), the sum of exp(x - max)(x - max) and the largest
+logit at any other index. The sampler finishes from those four numbers:
+p = 1 / z for LLaDA and maskgit_plus, p minus the runner-up's probability
+for topk_margin, and sum e (x - max) / z - log z for Dream's entropy.
+The exponentials are f32, so a confidence differs from the host's f64 loop in
+the sixth digit; tests bound it at 1e-5 relative.
+
+**Fused elementwise kernels.** The quantized GEMMs want int8 activations, so
+each norm and the FFN activation end in a quantize. Run separately, a layer
+wrote and re-read the normalized rows and the product of the gate and up
+projections through global memory. Three kernels remove that traffic:
+`add_rmsnorm_quantize` adds the projection output into the residual stream,
+normalizes the sum and quantizes it; `rmsnorm_quantize` does the same for
+layer 0, whose input has no add; `silu_mul_quantize` quantizes silu(g) * u
+without storing it. The norm kernels give thread t the values t, t + 256, ...
+so a warp holds 32 consecutive values at each step, which is one
+quantization block, and the quantize step is the same `_quantize_lane` code
+the plain kernel runs. The float expressions and their order match the
+unfused kernels', so the fused output is identical to the chain's, which the
+tests assert exactly. The attention output still goes through the plain
+quantize kernel.
 
 **Attention on f16 tensor cores.** Each warp owns 16 queries and walks the
 keys 32 at a time. Q is scaled by 1/sqrt(d) and held in registers as f16
