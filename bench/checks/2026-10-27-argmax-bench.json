@@ -31,6 +31,23 @@
     "new": 231.225
   },
   "kernel_ms_per_forward_change_ms": 3.398,
+  "kernel_median_ms_per_forward": {
+    "base": [
+      195.366,
+      195.841,
+      195.821
+    ],
+    "new": [
+      195.845,
+      196.183,
+      196.049
+    ]
+  },
+  "kernel_median_ms_per_forward_median": {
+    "base": 195.821,
+    "new": 196.049
+  },
+  "kernel_median_ms_per_forward_change_ms": 0.228,
   "forward_ms_measured": {
     "base": [
       233.28792275,
@@ -64,5 +81,95 @@
     "base": 250.452,
     "new": 234.314
   },
-  "ms_per_step_measured_change_ms": -16.138
+  "ms_per_step_measured_change_ms": -16.138,
+  "groups_ms_per_forward_median": {
+    "add": {
+      "base": 2.759,
+      "new": 2.759
+    },
+    "attention": {
+      "base": 8.399,
+      "new": 8.436
+    },
+    "copy_rows": {
+      "base": 0.015,
+      "new": 0.015
+    },
+    "gemm_q4k": {
+      "base": 161.047,
+      "new": 163.47
+    },
+    "gemm_q6k": {
+      "base": 42.401,
+      "new": 42.71
+    },
+    "other:mojo_dllm_gpu_kernels__row_st6A6A6A6A6A6A": {
+      "base": 0.0,
+      "new": 0.562
+    },
+    "quantize": {
+      "base": 4.459,
+      "new": 4.512
+    },
+    "rmsnorm": {
+      "base": 2.467,
+      "new": 2.47
+    },
+    "rope": {
+      "base": 2.006,
+      "new": 2.011
+    },
+    "silu_mul": {
+      "base": 4.276,
+      "new": 4.276
+    }
+  },
+  "groups_launches_per_forward_median": {
+    "add": {
+      "base": 64.0,
+      "new": 64.0
+    },
+    "attention": {
+      "base": 32.0,
+      "new": 32.0
+    },
+    "copy_rows": {
+      "base": 2.0,
+      "new": 2.0
+    },
+    "gemm_q4k": {
+      "base": 192.0,
+      "new": 192.0
+    },
+    "gemm_q6k": {
+      "base": 33.0,
+      "new": 33.0
+    },
+    "other:mojo_dllm_gpu_kernels__row_st6A6A6A6A6A6A": {
+      "base": 0.0,
+      "new": 1.0
+    },
+    "quantize": {
+      "base": 129.0,
+      "new": 129.0
+    },
+    "rmsnorm": {
+      "base": 65.0,
+      "new": 65.0
+    },
+    "rope": {
+      "base": 64.0,
+      "new": 64.0
+    },
+    "silu_mul": {
+      "base": 32.0,
+      "new": 32.0
+    }
+  },
+  "definitions": {
+    "kernel_ms_per_forward": "sum of every kernel instance's device time, per forward pass",
+    "kernel_median_ms_per_forward": "for each kernel, its median instance time times its launches, summed, per forward pass",
+    "forward_ms_measured": "the model's own timer around one forward pass, per pass (tm.total_ns / forward passes)",
+    "ms_per_step_measured": "generate seconds over forward passes"
+  }
 }
