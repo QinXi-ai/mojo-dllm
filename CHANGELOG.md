@@ -36,8 +36,9 @@ semantic versioning (0.y: minor bumps may break things).
   unpacks the A fragments in registers and prefetches the next super-block,
   as the Q4_K kernel does. The staged block grows from 212 to 224 bytes (74.6
   MB more device memory on LLaDA-8B). The accumulation order is unchanged.
-  LLaDA-8B at 148 tokens: 166.1 to 151.0 ms per forward (median of three
-  interleaved traces, `bench/profiles/2026-10-27-q6k-*`), logits identical
+  LLaDA-8B at 148 tokens: 166.1 to 151.0 ms per forward, the Q6_K GEMM going
+  from 44.5 to 27.3 ms of kernel time (median of three interleaved traces,
+  `bench/profiles/2026-10-27-q6k-*`). The forward logits are identical
   (`bench/checks/2026-10-27-q6k-*`; issue #11).
 - The Q4_K GPU GEMM keeps weights packed in shared memory and unpacks them
   in registers, staging with 16-byte copies; a block now covers 128 rows with
