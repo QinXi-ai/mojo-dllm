@@ -123,6 +123,8 @@ def _setup(args: SetupArgs, env: SetupEnv) -> int:
                 if _confirm(args, env, question):
                     model = fetch_model(plan, env.hub, out)
                 else:
+                    why = "declined" if env.is_tty else "no terminal to ask on; pass --yes to download"
+                    print(f"not downloaded ({why})", file=out)
                     outstanding.append(pull_cmd)
 
     _step(env, 4, "Check")

@@ -59,6 +59,7 @@ def test_without_a_tty_or_yes_the_model_is_an_outstanding_step(hub: FakeHub) -> 
     assert e.calls == ["sync", "build"]
     assert "Setup complete." not in text and "Try it:" not in text
     assert "  ./mojo-dllm pull" in text
+    assert "not downloaded (no terminal to ask on; pass --yes to download)" in text
     for step in ("[1/4] Toolchain", "[2/4] Build", "[3/4] Model", "[4/4] Check"):
         assert step in text
 
