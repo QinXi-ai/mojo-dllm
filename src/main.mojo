@@ -14,7 +14,7 @@ from std.ffi import external_call, c_int
 from std.sys import argv, exit, num_logical_cores
 from std.time import perf_counter_ns
 
-from cli.args import Args, parse_csv_ints
+from cli.args import Args, parse_csv_ints, unknown_flag_error
 from mojo_dllm.formats.gguf import GGUFFile, GGUF_TYPE_ARRAY
 from mojo_dllm.diffusion.sampler import (
     GenConfig,
@@ -29,24 +29,202 @@ from mojo_dllm.tokenizer.bpe import Tokenizer
 comptime VERSION = "0.1.0"
 
 
-def usage() -> String:
+struct CommandSpec(Movable):
+    """The flags one command declares, and what it requires."""
+
+    var values: List[String]
+    var booleans: List[String]
+    var required: List[String]
+    var takes_path: Bool
+
+    def __init__(
+        out self,
+        var values: List[String],
+        var booleans: List[String],
+        var required: List[String],
+        takes_path: Bool = False,
+    ):
+        self.values = values^
+        self.booleans = booleans^
+        self.required = required^
+        self.takes_path = takes_path
+
+    def declared(self) -> List[String]:
+        var names = List[String]()
+        for v in self.values:
+            names.append(v)
+        for b in self.booleans:
+            names.append(b)
+        return names^
+
+
+def command_spec(command: String) raises -> CommandSpec:
+    if command == "run":
+        return CommandSpec(
+            [
+                "model",
+                "prompt",
+                "max-tokens",
+                "steps",
+                "block-length",
+                "temperature",
+                "remasking",
+                "seed",
+                "threads",
+                "device",
+            ],
+            boolean_flags(),
+            ["model", "prompt"],
+        )
+    if command == "tokenize":
+        return CommandSpec(
+            ["model", "prompt"], ["no-chat"], ["model", "prompt"]
+        )
+    if command == "inspect":
+        return CommandSpec([], [], [], takes_path=True)
+    if command == "logits":
+        return CommandSpec(
+            ["model", "tokens", "rows", "out", "threads", "device"],
+            [],
+            ["model", "tokens", "rows", "out"],
+        )
+    raise Error("unknown command: " + command)
+
+
+def command_usage(command: String) raises -> String:
+    """The usage lines of one command, without a trailing newline."""
+    if command == "run":
+        return (
+            "  mojo-dllm run --model M --prompt TEXT [--max-tokens 128]"
+            " [--steps 128] [--block-length 32]\n"
+            + "                [--seed 42] [--temperature 0] [--threads N]"
+            " [--device cpu|gpu]\n"
+            + "                [--remasking low_confidence|random]\n"
+            + "                [--no-chat] [--full-logits] [--no-early-stop]"
+            " [--visual] [--verbose] [--dump-step-stats] [--json]"
+        )
+    if command == "tokenize":
+        return "  mojo-dllm tokenize --model M --prompt TEXT [--no-chat]"
+    if command == "inspect":
+        return "  mojo-dllm inspect MODEL.gguf"
+    if command == "logits":
+        return (
+            "  mojo-dllm logits --model M --tokens IDS --rows POS --out FILE"
+            " [--threads N] [--device cpu|gpu]"
+        )
+    raise Error("unknown command: " + command)
+
+
+def usage_for(command: String) raises -> String:
+    return "usage:\n" + command_usage(command)
+
+
+def usage() raises -> String:
     return (
         "mojo-dllm "
         + VERSION
         + ": diffusion language model inference in Mojo\n\n"
         + "usage:\n"
-        + "  mojo-dllm run --model M --prompt TEXT [--max-tokens 128] [--steps"
-        " 128] [--block-length 32]\n"
-        + "                [--seed 42] [--temperature 0] [--threads N]"
-        " [--device cpu|gpu]\n"
-        + "                [--remasking low_confidence|random]\n"
-        + "                [--no-chat] [--full-logits] [--no-early-stop]"
-        " [--visual] [--verbose] [--dump-step-stats] [--json]\n"
-        + "  mojo-dllm tokenize --model M --prompt TEXT [--no-chat]\n"
-        + "  mojo-dllm inspect MODEL.gguf\n"
-        + "  mojo-dllm logits --model M --tokens IDS --rows POS --out FILE"
-        " [--threads N] [--device cpu|gpu]\n"
+        + command_usage("run")
+        + "\n"
+        + command_usage("tokenize")
+        + "\n"
+        + command_usage("inspect")
+        + "\n"
+        + command_usage("logits")
+        + "\n"
+        + "\nrun mojo-dllm COMMAND --help for one command's usage\n"
     )
+
+
+def is_top_level_help(command: String) -> Bool:
+    return (
+        command == ""
+        or command == "help"
+        or command == "--help"
+        or command == "-h"
+    )
+
+
+def command_known(command: String) -> Bool:
+    try:
+        _ = command_spec(command)
+        return True
+    except:
+        return False
+
+
+def check_args(a: Args, spec: CommandSpec) raises -> String:
+    """The usage error for the parsed arguments, or "" when they are valid."""
+    if len(a.unknown) > 0:
+        return unknown_flag_error(a.command, a.unknown[0], spec.declared())
+    var see = "\nsee: mojo-dllm " + a.command + " --help"
+    if len(a.positional) > 0 and not spec.takes_path:
+        return (
+            "unexpected argument '"
+            + a.positional[0]
+            + "' for '"
+            + a.command
+            + "'"
+            + see
+        )
+    for name in spec.required:
+        if not a.has(name):
+            return (
+                "missing required flag --"
+                + name
+                + " for '"
+                + a.command
+                + "'\n"
+                + usage_for(a.command)
+            )
+    if spec.takes_path and len(a.positional) == 0:
+        return (
+            "missing model path for '"
+            + a.command
+            + "'\n"
+            + usage_for(a.command)
+        )
+    return String("")
+
+
+def open_failure_reason(path: String) -> String:
+    """Why the operating system refuses to open `path`, in its own words."""
+    try:
+        with open(path, "r") as f:
+            _ = f.read_bytes(1)
+    except e:
+        var text = String(e)
+        var marker = "': "
+        var at = text.find(marker)
+        if at >= 0:
+            return String(text[byte = at + marker.byte_length() :])
+        return text
+    return String("the file opens but the runtime could not map it")
+
+
+def model_error(message: String) -> String:
+    """Adds the next step to a model-file error. Other errors pass through."""
+    var cannot_open = "cannot open file: "
+    if message.startswith(cannot_open):
+        var path = String(message[byte = cannot_open.byte_length() :])
+        return (
+            "cannot open model file "
+            + path
+            + ": "
+            + open_failure_reason(path)
+            + "\nto download a model, run: ./mojo-dllm pull"
+        )
+    var bad_magic = "not a GGUF file (bad magic): "
+    if message.startswith(bad_magic):
+        var path = String(message[byte = bad_magic.byte_length() :])
+        return (
+            path
+            + " is not a GGUF file (bad magic).\na failed download leaves an"
+            " HTML error page with a .gguf name; delete the file and run"
+            " ./mojo-dllm pull again"
+        )
+    return message
 
 
 def peak_rss_bytes() raises -> Int:
@@ -398,8 +576,6 @@ def _csv(xs: List[Int]) -> String:
 
 
 def cmd_inspect(a: Args) raises:
-    if len(a.positional) < 1:
-        raise Error("inspect needs a model path")
     var g = GGUFFile(a.positional[0])
     print("file:", a.positional[0])
     print("gguf version:", g.version)
@@ -479,20 +655,33 @@ def main():
     var raw = List[String]()
     for s in argv():
         raw.append(String(s))
+    var command = raw[1] if len(raw) > 1 else String("")
+    var parsing = True
     try:
-        var a = Args(raw, boolean_flags())
-        if a.command == "run":
-            cmd_run(a)
-        elif a.command == "tokenize":
-            cmd_tokenize(a)
-        elif a.command == "inspect":
-            cmd_inspect(a)
-        elif a.command == "logits":
-            cmd_logits(a)
-        elif a.command == "" or a.command == "help" or a.command == "--help":
+        if is_top_level_help(command):
             print(usage())
+            return
+        var spec = command_spec(command)
+        var a = Args(raw, spec.values, spec.booleans)
+        parsing = False
+        if a.has("help"):
+            print(usage_for(command))
+            return
+        var problem = check_args(a, spec)
+        if problem.byte_length() > 0:
+            print("ERROR:", problem)
+            exit(2)
+        if command == "run":
+            cmd_run(a)
+        elif command == "tokenize":
+            cmd_tokenize(a)
+        elif command == "inspect":
+            cmd_inspect(a)
         else:
-            raise Error("unknown command: " + a.command)
+            cmd_logits(a)
     except e:
-        print("ERROR:", e)
+        print("ERROR:", model_error(String(e)))
+        if parsing and command_known(command):
+            print("see: mojo-dllm", command, "--help")
+            exit(2)
         exit(1)
