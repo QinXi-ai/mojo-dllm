@@ -15,8 +15,9 @@ semantic versioning (0.y: minor bumps may break things).
   kernel evaluates the unfused kernels' f32 expressions in the same order, and
   the GPU tests compare each against its chain bit for bit (issue #10).
   LLaDA-8B at 148 tokens: 236.1 to 226.4 ms per forward (median of three
-  interleaved traces, `bench/profiles/2026-10-27-fuse-*`), logits identical
-  (`bench/checks/2026-10-27-fuse-*`).
+  interleaved traces, `bench/profiles/2026-10-27-fuse-*`). The fused kernels
+  account for 5.7 ms of that and the rest is GEMM timing variation between
+  runs. The forward logits are identical (`bench/checks/2026-10-27-fuse-*`).
 - Greedy decoding scores each requested row on the GPU. One block per row
   reduces its logits to the first argmax, the maximum, the sum of
   exp(x - max), the runner-up logit and the sum of exp(x - max)(x - max); the
