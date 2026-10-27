@@ -1,0 +1,68 @@
+{
+  "date": "2026-10-27",
+  "model": "LLaDA-8B-Instruct.Q4_K_M.gguf",
+  "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU, 595.99.02",
+  "seq_len": 148,
+  "steps": 4,
+  "forward_passes": 4,
+  "method": "scripts/gpu_profile.py (nsys --trace=cuda), three interleaved rounds, base = main(56d0407)",
+  "versions": {
+    "base": [
+      "56d0407"
+    ],
+    "new": [
+      "f7f1926"
+    ]
+  },
+  "kernel_ms_per_forward": {
+    "base": [
+      227.184,
+      229.19,
+      227.827
+    ],
+    "new": [
+      227.289,
+      231.225,
+      232.097
+    ]
+  },
+  "kernel_ms_per_forward_median": {
+    "base": 227.827,
+    "new": 231.225
+  },
+  "kernel_ms_per_forward_change_ms": 3.398,
+  "forward_ms_measured": {
+    "base": [
+      233.28792275,
+      235.01754075,
+      234.59219625
+    ],
+    "new": [
+      229.607024,
+      234.299029,
+      235.8004865
+    ]
+  },
+  "forward_ms_measured_median": {
+    "base": 234.592,
+    "new": 234.299
+  },
+  "forward_ms_measured_change_ms": -0.293,
+  "ms_per_step_measured": {
+    "base": [
+      249.968585,
+      250.452067,
+      252.57732475
+    ],
+    "new": [
+      229.61960200000001,
+      234.3144585,
+      235.82147325
+    ]
+  },
+  "ms_per_step_measured_median": {
+    "base": 250.452,
+    "new": 234.314
+  },
+  "ms_per_step_measured_change_ms": -16.138
+}

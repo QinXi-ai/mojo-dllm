@@ -15,7 +15,10 @@ semantic versioning (0.y: minor bumps may break things).
   maskgit_plus and topk_margin confidence, so a step copies a few hundred
   bytes instead of the logits rows. `--temperature` above 0 and
   `--full-logits` keep the host path. Tests compare the kernel with the host
-  loops (issue #9); the time saved per step is measured separately.
+  loops (issue #9). LLaDA-8B at 148 tokens: 250.5 to 234.3 ms per step, with the
+  forward pass unchanged (234.6 and 234.3 ms) and the logits identical to
+  main's (median of three interleaved traces,
+  `bench/profiles/2026-10-27-argmax-*`, `bench/checks/2026-10-27-argmax-*`).
 - Generation stops once the printed answer is final (an end-of-text token
   after a fully committed answer). The output is identical; `--no-early-stop`
   runs every step, and the harnesses pass it so comparisons stay step for
