@@ -32,6 +32,10 @@ def alloc_bytes(n_bytes: Int, zero: Bool = True) raises -> Int:
     candidates: the repacked model is about 5 GB, and 4 KiB pages would cost
     over a million page faults to populate it.
     """
+    if n_bytes < 0:
+        raise Error(
+            "cannot allocate a negative size: " + String(n_bytes) + " bytes"
+        )
     var align = HUGE if n_bytes >= HUGE else ALIGN
     var size = ((max(n_bytes, 1) + align - 1) // align) * align
     var addr = Int(
