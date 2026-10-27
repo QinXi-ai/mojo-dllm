@@ -28,14 +28,13 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
-          python-version: "3.12"
+          version: "0.9.7"
+          enable-cache: true
 
-      - name: Install lint tools at exact versions
-        run: |
-          npm install --global markdownlint-cli2@0.23.2
-          python -m pip install yamllint==1.38.0 PyYAML==6.0.2
+      - name: Install markdownlint at its exact version
+        run: npm install --global markdownlint-cli2@0.23.2
 
       - name: Secrets and employer name in tracked files
         # Report every gate, not just the first failure.
@@ -48,7 +47,7 @@ jobs:
 
       - name: yamllint
         if: ${{ !cancelled() }}
-        run: yamllint --strict .github
+        run: uv run --frozen --only-group lint yamllint --strict .github
 
       - name: markdownlint
         if: ${{ !cancelled() }}
@@ -56,11 +55,11 @@ jobs:
 
       - name: README benchmark numbers come from bench/results
         if: ${{ !cancelled() }}
-        run: python scripts/bench_table.py --check
+        run: uv run --frozen --no-project python scripts/bench_table.py --check
 
       - name: GSM8K eval harness self-test
         if: ${{ !cancelled() }}
-        run: python bench/eval_gsm8k.py --self-test
+        run: uv run --frozen --no-project python bench/eval_gsm8k.py --self-test
 
       - name: Action pins match the tags in their comments
         if: ${{ !cancelled() }}
@@ -73,27 +72,29 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e  # v0.10.2
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
-          pixi-version: v0.81.0
-          cache: true
-          locked: true
+          version: "0.9.7"
+          enable-cache: true
+
+      - name: Install the pinned Mojo toolchain
+        run: uv sync --frozen
 
       - name: mojo format (no check mode, so format and diff)
-        run: pixi run fmt-check
+        run: uv run --frozen mojo format -q src tests bench && git diff --exit-code -- src tests bench
 
       - name: Build with -Werror
-        run: pixi run build
+        run: bash scripts/build.sh
 
       - name: Tests, with the passing count pinned
-        run: pixi run test
+        run: bash scripts/run-tests.sh
 
       # The runner has no GPU. scripts/build.sh then compiles the kernels for
       # sm_80; the GPU suite runs locally through scripts/run-gpu-tests.sh.
       # Here it must still build, and --device gpu must fail with a message
       # rather than a crash.
       - name: GPU test suite builds
-        run: MOJO="pixi run mojo" bash scripts/build.sh tests/gpu/test_gpu.mojo build/tests/test_gpu
+        run: bash scripts/build.sh tests/gpu/test_gpu.mojo build/tests/test_gpu
 
       - name: --device gpu without a GPU fails cleanly
         run: bash scripts/check_no_gpu.sh

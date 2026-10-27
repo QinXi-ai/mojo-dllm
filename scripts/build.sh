@@ -21,9 +21,9 @@ if [ -z "$arch" ]; then
         arch=sm_80
     fi
 fi
-if [ -z "${MOJO:-}" ]; then
-    if command -v mojo >/dev/null 2>&1; then MOJO=mojo; else MOJO="pixi run mojo"; fi
-fi
+# The compiler is the one uv.lock pins. MOJO replaces it: the sandbox that runs
+# contributor pull requests points it at a read-only copy.
+MOJO="${MOJO:-uv run --frozen mojo}"
 mkdir -p "$(dirname "$out")"
-# shellcheck disable=SC2086  # MOJO may be "pixi run mojo"
+# shellcheck disable=SC2086  # MOJO is a command with arguments
 exec $MOJO build -Werror --target-accelerator "$arch" -I src "$src" -o "$out"

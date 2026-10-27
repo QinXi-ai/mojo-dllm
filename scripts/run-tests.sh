@@ -15,9 +15,8 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
-if [ -z "${MOJO:-}" ]; then
-    if command -v mojo >/dev/null 2>&1; then MOJO=mojo; else MOJO="pixi run mojo"; fi
-fi
+# The compiler is the one uv.lock pins; MOJO replaces it (see scripts/build.sh).
+MOJO="${MOJO:-uv run --frozen mojo}"
 mkdir -p build/tests
 
 test_dir="${TEST_DIR:-tests}"

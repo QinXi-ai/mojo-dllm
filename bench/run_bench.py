@@ -76,6 +76,14 @@ def sh(cmd: str) -> str:
     return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout.strip()
 
 
+def mojo_version() -> str:
+    """The compiler version recorded with the results: the one uv.lock pins."""
+    p = subprocess.run(["uv", "run", "--frozen", "mojo", "--version"], cwd=ROOT, capture_output=True, text=True)
+    if p.returncode != 0 or not p.stdout.strip():
+        raise SystemExit(f"run_bench: `uv run --frozen mojo --version` failed: {p.stderr.strip() or 'no output'}")
+    return p.stdout.strip().splitlines()[-1]
+
+
 def cpu_busy(sample_s: float = 2.0) -> float:
     """Fraction of all CPU time spent busy over a short sample (0..1).
 
@@ -290,7 +298,7 @@ def main() -> int:
     versions = {
         "mojo-dllm": sh(f"git -C {shlex.quote(str(ROOT))} rev-parse --short HEAD")
         + ("-dirty" if sh(f"git -C {shlex.quote(str(ROOT))} status --porcelain -- src") else ""),
-        "mojo": sh(f"cd {shlex.quote(str(ROOT))} && ~/.pixi/bin/pixi run mojo --version").splitlines()[-1],
+        "mojo": mojo_version(),
         "llama.cpp": sh(f"git -C {shlex.quote(c['llama_cpp'])} rev-parse --short HEAD"),
         "diffuse-cpp": sh(f"git -C {shlex.quote(c['diffuse_cpp'])} rev-parse --short HEAD"),
     }
