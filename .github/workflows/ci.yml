@@ -33,6 +33,9 @@ jobs:
           version: "0.9.7"
           enable-cache: true
 
+      - name: Launcher tests
+        run: uv run --frozen --only-group test pytest tests/python -q
+
       - name: Install markdownlint at its exact version
         run: npm install --global markdownlint-cli2@0.23.2
 

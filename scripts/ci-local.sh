@@ -96,6 +96,9 @@ yaml_lint() {
 md_lint() {
     need markdownlint-cli2 && markdownlint-cli2 "*.md" "docs/**/*.md" "#docs/spec.md" "#node_modules"
 }
+launcher_tests() {
+    need uv && uv run --frozen --only-group test pytest tests/python -q
+}
 claims() {
     need uv && uv run --frozen --no-project python scripts/bench_table.py --check &&
         uv run --frozen --no-project python bench/eval_gsm8k.py --self-test
@@ -123,6 +126,7 @@ if [ "$mode" = full ]; then
     step "shellcheck" shell_lint
     step "yamllint" yaml_lint
     step "markdownlint" md_lint
+    step "launcher tests" launcher_tests
     step "README numbers match bench/results" claims
     step "docs build + links" docs_build
     step "action pins match their tags" action_pins
