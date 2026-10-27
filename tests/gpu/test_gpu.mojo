@@ -362,8 +362,9 @@ def _check_rmsnorm_quantize(rows: Int, K: Int) raises:
 
 def test_fused_rmsnorm_quantize_matches_chain() raises:
     _check_rmsnorm_quantize(4, 1024)
-    # 288 = 9 x 32: the second pass of the block loop covers one warp only.
-    _check_rmsnorm_quantize(5, 288)
+    # Activation widths are multiples of 256 (GpuQActs), the block size, so the
+    # quantize loop always runs whole passes: 768 takes three of them.
+    _check_rmsnorm_quantize(5, 768)
 
 
 def _check_add_rmsnorm_quantize(rows: Int, K: Int) raises:
@@ -396,7 +397,7 @@ def _check_add_rmsnorm_quantize(rows: Int, K: Int) raises:
 
 def test_fused_add_rmsnorm_quantize_matches_chain() raises:
     _check_add_rmsnorm_quantize(4, 1024)
-    _check_add_rmsnorm_quantize(5, 288)
+    _check_add_rmsnorm_quantize(5, 768)
 
 
 def test_fused_silu_mul_quantize_matches_chain() raises:
