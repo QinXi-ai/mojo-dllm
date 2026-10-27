@@ -18,7 +18,6 @@ from mojo_dllm.formats.gguf import GGUFFile, TensorInfo
 from mojo_dllm.gpu.kernels import (
     GpuQActs,
     add_bias_gpu,
-    add_gpu,
     attention_gpu,
     copy_rows_gpu,
     dev_f32,
@@ -27,11 +26,12 @@ from mojo_dllm.gpu.kernels import (
     dev_u8,
     gemm_gpu,
     quantize_gpu,
-    rmsnorm_gpu,
+    rmsnorm_quantize_gpu,
+    add_rmsnorm_quantize_gpu,
+    silu_mul_quantize_gpu,
     rope_gpu,
     row_stats_gpu,
     RS_FIELDS,
-    silu_mul_gpu,
     stage_matrix,
     staged_matrix_bytes,
 )
@@ -532,8 +532,11 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
         var rows = L
         for li in range(c.n_layers):
             var ly = self.layers[li]
-            rmsnorm_gpu(ctx, x, self._f32(ly.attn_norm), xn, rows, d, c.eps)
-            quantize_gpu(ctx, xn, rows, d, self.qa_h)
+            if li == 0:
+                # Later layers start from the previous layer's fused tail.
+                rmsnorm_quantize_gpu(
+                    ctx, x, self._f32(ly.attn_norm), self.qa_h, rows, d, c.eps
+                )
             self.timings.gemm_ns += self._gemm(ly.wq, self.qa_h, rows, q, d)
             self.timings.gemm_ns += self._gemm(ly.wk, self.qa_h, rows, k, kvd)
             self.timings.gemm_ns += self._gemm(ly.wv, self.qa_h, rows, v, kvd)
@@ -582,18 +585,22 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
                     self.att.create_sub_buffer[DType.float32](0, n_out * d),
                 )
                 rows = n_out
-            add_gpu(ctx, x, h, rows * d)
-            rmsnorm_gpu(ctx, x, self._f32(ly.ffn_norm), xn, rows, d, c.eps)
-            quantize_gpu(ctx, xn, rows, d, self.qa_h)
+            add_rmsnorm_quantize_gpu(
+                ctx, x, h, self._f32(ly.ffn_norm), self.qa_h, rows, d, c.eps
+            )
             self.timings.gemm_ns += self._gemm(ly.wg, self.qa_h, rows, g, c.ffn)
             self.timings.gemm_ns += self._gemm(ly.wu, self.qa_h, rows, u, c.ffn)
-            silu_mul_gpu(ctx, g, u, rows * c.ffn)
-            quantize_gpu(ctx, g, rows, c.ffn, self.qa_f)
+            silu_mul_quantize_gpu(ctx, g, u, self.qa_f, rows, c.ffn)
             self.timings.gemm_ns += self._gemm(ly.wd, self.qa_f, rows, h, d)
-            add_gpu(ctx, x, h, rows * d)
+            # Residual add, then the next layer's attention norm (or the
+            # output norm after the last layer), quantized for its GEMMs.
+            var next_norm = self.out_norm
+            if li + 1 < c.n_layers:
+                next_norm = self.layers[li + 1].attn_norm
+            add_rmsnorm_quantize_gpu(
+                ctx, x, h, self._f32(next_norm), self.qa_h, rows, d, c.eps
+            )
 
-        rmsnorm_gpu(ctx, x, self._f32(self.out_norm), xn, n_out, d, c.eps)
-        quantize_gpu(ctx, xn, n_out, d, self.qa_h)
         self.timings.head_ns += self._gemm(
             self.output, self.qa_h, n_out, dev_f32(self.logits), c.vocab
         )
