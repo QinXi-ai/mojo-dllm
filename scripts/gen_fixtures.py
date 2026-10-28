@@ -8,7 +8,9 @@ value comes from llama.cpp's own `gguf` package (its K-quant dequantizers) or
 from a plain numpy forward pass over those dequantized weights, so the Mojo
 code is checked against the reference implementation and not against itself.
 
-Outputs (deterministic, seed 1234):
+Outputs (deterministic, seed 1234 unless noted):
+  tests/fixtures/dequant-types.gguf Q8_0 / Q5_K / BF16 references, separate seed 340034
+  tests/fixtures/unsupported-embedding.gguf minimal IQ2_XXS embedding, no RNG
   tests/fixtures/kquants.gguf      Q4_K / Q6_K / F16 tensors + their f32 dequantization
   tests/fixtures/bad-magic.gguf    a file whose magic is wrong
   tests/fixtures/tiny-llada.gguf   2-layer LLaDA-shaped model, hidden 256, vocab 512
@@ -331,8 +333,26 @@ def main() -> None:
     tiny_llada()
     tiny_dream()
     dequant_types()
+    unsupported_embedding()
     for p in sorted(OUT.iterdir()):
         print(f"{p.stat().st_size:>9}  {p.relative_to(ROOT)}")
+
+
+def unsupported_embedding() -> None:
+    """Minimal model directory: construction must reject the embedding first."""
+    w = GGUFWriter(str(OUT / "unsupported-embedding.gguf"), "llada")
+    for key, value in {"block_count": 1, "embedding_length": 256,
+                       "attention.head_count": 2, "feed_forward_length": 256,
+                       "vocab_size": 1}.items():
+        w.add_uint32("llada." + key, value)
+    w.add_float32("llada.attention.layer_norm_rms_epsilon", 1e-5)
+    w.add_uint32("tokenizer.ggml.mask_token_id", 0)
+    data = np.zeros((1, 66), dtype=np.uint8)
+    w.add_tensor("token_embd.weight", data, raw_shape=data.shape, raw_dtype=Q.IQ2_XXS)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
 
 
 if __name__ == "__main__":

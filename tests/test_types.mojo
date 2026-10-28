@@ -4,9 +4,10 @@ from mojo_dllm.quant.kquants import (
     has_decoder,
     has_matrix_kernel,
     check_matrix_type,
+    check_embedding_type,
 )
-from mojo_dllm.models.transformer import _load_matrix
-from mojo_dllm.gpu.model import _Planner, _plan_matrix
+from mojo_dllm.models.transformer import _load_matrix, DiffusionLM
+from mojo_dllm.gpu.model import _Planner, _plan_matrix, GpuDiffusionLM
 
 
 def test_decoder_and_matrix_support() raises:
@@ -59,6 +60,43 @@ def test_gpu_planner_rejects_decodable_matrix_before_allocation() raises:
     ):
         _ = _plan_matrix(g, plan, "q8_0", 4, 96)
     assert_equal(plan.size, 0)
+
+
+def test_cpu_constructor_rejects_embedding_by_name() raises:
+    with assert_raises(
+        contains=(
+            "unsupported GGUF tensor type: IQ2_XXS (tensor token_embd.weight)"
+        )
+    ):
+        _ = DiffusionLM(
+            "tests/fixtures/unsupported-embedding.gguf", threads=1, max_tokens=1
+        )
+
+
+def test_gpu_constructor_checks_embedding_before_device_creation() raises:
+    with assert_raises(
+        contains=(
+            "unsupported GGUF tensor type: IQ2_XXS (tensor token_embd.weight)"
+        )
+    ):
+        _ = GpuDiffusionLM(
+            "tests/fixtures/unsupported-embedding.gguf", max_tokens=1
+        )
+
+
+def test_embedding_types_accept_all_decoders_and_name_unknown_tensor() raises:
+    for t in List[Int]([0, 1, 30, 8, 12, 13, 14]):
+        check_embedding_type(
+            TensorInfo("token_embd.weight", 2, 256, 1, 1, 1, t, 0, 0)
+        )
+    with assert_raises(
+        contains=(
+            "unsupported GGUF tensor type: IQ2_XXS (tensor token_embd.weight)"
+        )
+    ):
+        check_embedding_type(
+            TensorInfo("token_embd.weight", 2, 256, 1, 1, 1, 16, 0, 0)
+        )
 
 
 def main() raises:

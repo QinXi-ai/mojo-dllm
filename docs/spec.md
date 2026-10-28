@@ -373,7 +373,7 @@ unsupported GGUF tensor type: IQ3_XS (tensor blk.0.attn_q.weight)
 
 No silent fallback.
 
-A type with a reference decoder but without a matrix kernel MUST also fail
+A type with a reference decoder but without a matrix kernel currently fails
 at matrix load, for example:
 
 ```text

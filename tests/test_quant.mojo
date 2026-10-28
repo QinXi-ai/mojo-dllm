@@ -10,12 +10,13 @@ from mojo_dllm.sys.mem import Bytes, Floats, F32Ptr
 comptime FIX = "tests/fixtures/"
 
 
-def _expect_rows_match(g: GGUFFile, name: String, expected: String) raises:
+def _expect_rows_match(
+    g: GGUFFile, name: String, expected: String, rtol: Float32 = 0
+) raises:
     var t = g.tensor(name)
     var e = g.tensor(expected)
     var row = Floats(t.ne0)
     var ep = F32Ptr(unsafe_from_address=g.data_addr(e))
-    var worst = Float32(0)
     for r in range(t.n_rows()):
         dequant_row(
             t.ggml_type, g.data_addr(t) + r * t.row_bytes(), row.ptr(), t.ne0
@@ -24,9 +25,10 @@ def _expect_rows_match(g: GGUFFile, name: String, expected: String) raises:
             var want = ep.unsafe_load(r * t.ne0 + i)
             var diff = abs(row[i] - want)
             assert_true(diff == diff, name + " produced NaN")
-            if diff > worst:
-                worst = diff
-    assert_true(worst <= 1e-6, name + " max abs diff " + String(worst))
+            assert_true(
+                diff <= 1e-6 + rtol * abs(want),
+                name + " abs diff " + String(diff),
+            )
 
 
 def test_q4k_dequant_matches_reference() raises:
@@ -61,7 +63,8 @@ def test_q8_0_dequant_matches_reference() raises:
 
 def test_q5k_dequant_matches_reference() raises:
     var g = GGUFFile(FIX + "dequant-types.gguf")
-    _expect_rows_match(g, "q5k", "q5k.expected")
+    # Allow two f32 relative rounding steps; retain an absolute floor near zero.
+    _expect_rows_match(g, "q5k", "q5k.expected", rtol=2.4e-7)
 
 
 def test_bf16_dequant_matches_reference() raises:

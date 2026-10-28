@@ -27,7 +27,7 @@ results):
 
 from std.time import perf_counter_ns
 
-from mojo_dllm.formats.gguf import GGUFFile, TensorInfo, ggml_row_bytes
+from mojo_dllm.formats.gguf import GGUFFile, TensorInfo
 from mojo_dllm.kernels.packed import PackedMatrix, pgemm
 from mojo_dllm.kernels.qgemm import QActs, quantize_acts
 from mojo_dllm.kernels.ops import (
@@ -39,7 +39,11 @@ from mojo_dllm.kernels.ops import (
     add_inplace,
     add_bias,
 )
-from mojo_dllm.quant.kquants import dequant_row, check_matrix_type
+from mojo_dllm.quant.kquants import (
+    dequant_row,
+    check_matrix_type,
+    check_embedding_type,
+)
 from mojo_dllm.sys.mem import F32Ptr, Floats
 
 
@@ -257,7 +261,7 @@ struct DiffusionLM(DenoisingModel, Movable):
         self.threads = threads
         self.max_tokens = max_tokens
         self.embd = self.gguf.tensor("token_embd.weight")
-        _ = ggml_row_bytes(self.embd.ggml_type, self.embd.ne0)
+        check_embedding_type(self.embd)
         if self.embd.ne0 != c.hidden:
             raise Error(
                 "tensor shape mismatch for token_embd.weight: "

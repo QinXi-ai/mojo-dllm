@@ -14,7 +14,7 @@ from std.time import perf_counter_ns
 
 from max.gpu.host import DeviceBuffer, DeviceContext
 
-from mojo_dllm.formats.gguf import GGUFFile, TensorInfo, ggml_row_bytes
+from mojo_dllm.formats.gguf import GGUFFile, TensorInfo
 from mojo_dllm.gpu.kernels import (
     GpuQActs,
     add_bias_gpu,
@@ -34,7 +34,11 @@ from mojo_dllm.gpu.kernels import (
 )
 from mojo_dllm.kernels.ops import rope_table
 from mojo_dllm.models.transformer import DenoisingModel, ModelConfig, Timings
-from mojo_dllm.quant.kquants import dequant_row, check_matrix_type
+from mojo_dllm.quant.kquants import (
+    dequant_row,
+    check_matrix_type,
+    check_embedding_type,
+)
 from mojo_dllm.sys.mem import Bytes, F32Ptr, Floats, I32Ptr, U8Ptr
 
 comptime ALIGN = 256
@@ -157,6 +161,13 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
 
     def __init__(out self, path: String, max_tokens: Int) raises:
         var t0 = perf_counter_ns()
+        # Validate host metadata before creating a device or allocating buffers.
+        self.gguf = GGUFFile(path)
+        self.cfg = ModelConfig(self.gguf)
+        var c = self.cfg
+        self.max_tokens = max_tokens
+        self.embd = self.gguf.tensor("token_embd.weight")
+        check_embedding_type(self.embd)
         if DeviceContext.number_of_devices() == 0:
             raise Error(
                 "no GPU found: the GPU backend needs an NVIDIA GPU with"
@@ -171,12 +182,6 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
                 + " has "
                 + String(self.ctx.compute_capability())
             )
-        self.gguf = GGUFFile(path)
-        self.cfg = ModelConfig(self.gguf)
-        var c = self.cfg
-        self.max_tokens = max_tokens
-        self.embd = self.gguf.tensor("token_embd.weight")
-        _ = ggml_row_bytes(self.embd.ggml_type, self.embd.ne0)
         if self.embd.ne0 != c.hidden:
             raise Error(
                 "tensor shape mismatch for token_embd.weight: "

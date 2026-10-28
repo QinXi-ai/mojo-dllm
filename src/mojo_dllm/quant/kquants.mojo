@@ -120,6 +120,18 @@ def has_matrix_kernel(t: Int) -> Bool:
     return t == GGML_Q4_K or t == GGML_Q6_K
 
 
+def check_embedding_type(t: TensorInfo) raises:
+    """Reject unsupported scalar decoding before accessing embedding data."""
+    if not has_decoder(t.ggml_type):
+        raise Error(
+            "unsupported GGUF tensor type: "
+            + t.type_name()
+            + " (tensor "
+            + t.name
+            + ")"
+        )
+
+
 def check_matrix_type(t: TensorInfo) raises:
     if not has_decoder(t.ggml_type):
         raise Error(
