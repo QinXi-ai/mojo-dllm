@@ -81,7 +81,11 @@ The checker reads safetensors headers only and reverses GGUF dimension order
 before comparing. It reports mismatches, missing tensors on either side, and
 unmapped source names; dtypes are shown for reference, not compared. Use
 `--ignore 'rotary.*inv_freq'` for source buffers intentionally omitted during
-conversion. An output tensor absent from a tied source is still reported as
+conversion; `ignored N` counts these source entries, and their mapped GGUF
+counterparts are also omitted. Index shard names must be bare `.safetensors`
+filenames resolving inside the index directory. The checker accepts 1–1024
+blocks to bound name-map construction. Malformed inputs return 2, including
+JSON nesting errors. An output tensor absent from a tied source is still reported as
 missing, with an explanation. Exit 0 means at least one tensor was compared and
 all comparisons passed, 1 means findings, and 2 means no comparison or invalid
 input. Shape agreement does not establish matching weights or logits.

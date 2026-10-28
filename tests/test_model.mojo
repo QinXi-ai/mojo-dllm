@@ -230,7 +230,11 @@ def test_config_rejects_hidden_shape() raises:
 
 def test_config_rejects_rope_width() raises:
     var g = GGUFFile(FIX + "metadata/rope-width.gguf")
-    with assert_raises(contains="llada.rope.dimension_count"):
+    with assert_raises(
+        contains=(
+            "llada.rope.dimension_count must equal head dimension 128, got 64"
+        )
+    ):
         _ = ModelConfig(g)
 
 
@@ -248,7 +252,7 @@ def test_config_rejects_rope_scaling_type() raises:
 
 def test_config_rejects_rope_scaling_factor() raises:
     var g = GGUFFile(FIX + "metadata/rope-factor.gguf")
-    with assert_raises(contains="llada.rope.scaling.factor"):
+    with assert_raises(contains="llada.rope.scaling.factor must be 1, got 4"):
         _ = ModelConfig(g)
 
 
@@ -283,6 +287,18 @@ def test_config_accepts_compatible_linear() raises:
     assert_equal(c.ctx, 4096)
     assert_equal(c.theta, 10000.0)
     assert_true(not c.shift_logits)
+
+
+def test_config_wrong_rotary_width_type_names_key() raises:
+    var g = GGUFFile(FIX + "metadata/rope-width-type.gguf")
+    with assert_raises(contains="metadata key llada.rope.dimension_count"):
+        _ = ModelConfig(g)
+
+
+def test_config_wrong_scaling_factor_type_names_key() raises:
+    var g = GGUFFile(FIX + "metadata/rope-factor-type.gguf")
+    with assert_raises(contains="metadata key llada.rope.scaling.factor"):
+        _ = ModelConfig(g)
 
 
 def main() raises:

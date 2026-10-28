@@ -1037,7 +1037,7 @@ The runtime should fail with actionable errors.
 Examples:
 
 ```text
-ERROR: unsupported model architecture: diffusion_gemma
+ERROR: unsupported model architecture: diffusion_gemma (supported: llada, dream)
 ERROR: unsupported GGUF tensor type: IQ2_XXS
 ERROR: required metadata key missing: tokenizer.ggml.model
 ERROR: tensor shape mismatch for blk.0.attn_q.weight

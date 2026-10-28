@@ -57,8 +57,14 @@ def read_source(path: Path) -> dict:
     for name, shard in weight_map.items():
         if not isinstance(shard, str):
             raise ValueError(f"{path}: invalid shard for {name}")
+        if (not shard.endswith(".safetensors") or shard == ".safetensors"
+                or any(c in shard for c in ("/", "\\", ":"))):
+            raise ValueError(f"{path}: shard must be a bare .safetensors filename: {shard}")
         if shard not in shards:
-            shards[shard] = read_header(path.parent / shard)
+            resolved = (path.parent / shard).resolve()
+            if resolved.parent != path.parent.resolve():
+                raise ValueError(f"{path}: shard resolves outside index directory: {shard}")
+            shards[shard] = read_header(resolved)
         if name not in shards[shard]:
             raise ValueError(f"{path}: {name} absent from declared shard {shard}")
         source[name] = shards[shard][name]
@@ -75,12 +81,14 @@ def name_map(reader):
     if architecture not in supported:
         raise ValueError(f"no tensor name map for architecture {architecture}")
     blocks = int(reader.fields[architecture + ".block_count"].contents())
+    if not 1 <= blocks <= 1024:
+        raise ValueError(f"{architecture}.block_count must be between 1 and 1024, got {blocks}")
     return gguf.get_tensor_name_map(supported[architecture], blocks)
 
 
 def compare(model: Path, source_path: Path, ignore: str | None = None) -> int:
     counts = dict(compared=0, ok=0, mismatch=0, missing_in_gguf=0,
-                  missing_in_source=0, unmapped=0)
+                  missing_in_source=0, unmapped=0, ignored=0)
     try:
         ignored = re.compile(ignore) if ignore is not None else None
         source = read_source(source_path)
@@ -93,6 +101,7 @@ def compare(model: Path, source_path: Path, ignore: str | None = None) -> int:
         for name, info in sorted(source.items()):
             mapped = mapper.get_name(name, try_suffixes=(".weight", ".bias"))
             if ignored and ignored.search(name):
+                counts["ignored"] += 1
                 if mapped:
                     seen.add(mapped)
                 continue
@@ -123,15 +132,14 @@ def compare(model: Path, source_path: Path, ignore: str | None = None) -> int:
             note = "; source may tie its output weights to the embeddings" if name == "output.weight" else ""
             print(f"missing in safetensors: {name}{note}")
             counts["missing_in_source"] += 1
-    except (OSError, ValueError, KeyError, TypeError, IndexError,
-            NotImplementedError, OverflowError, re.error) as error:
+    except Exception as error:
         print(f"ERROR: {error}")
         return_code = 2
     else:
         return_code = 2 if counts["compared"] == 0 else int(any(
             counts[k] for k in ("mismatch", "missing_in_gguf", "missing_in_source", "unmapped")))
     print("compared {compared}, ok {ok}, mismatch {mismatch}, missing-in-gguf {missing_in_gguf}, "
-          "missing-in-source {missing_in_source}, unmapped {unmapped}".format(**counts))
+          "missing-in-source {missing_in_source}, unmapped {unmapped}, ignored {ignored}".format(**counts))
     return return_code
 
 
@@ -166,6 +174,103 @@ def write_twin(directory: Path, shapes: dict) -> Path:
     return index
 
 
+def self_test_inputs(fixtures: Path) -> int:
+    """Pin diagnostics as well as status, so accidental exceptions do not pass."""
+    model = fixtures / "tiny-llada.gguf"
+    runs = 0
+    with tempfile.TemporaryDirectory() as temp:
+        directory = Path(temp)
+        source = directory / "source.safetensors"
+        index = directory / "index.json"
+        name = "model.transformer.wte.weight"
+
+        def expect(path, message, status=2, gguf_path=model, ignore=None):
+            nonlocal runs
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                code = compare(gguf_path, path, ignore)
+            assert code == status and message in captured.getvalue(), captured.getvalue()
+            runs += 1
+
+        def header(value):
+            data = json.dumps(value).encode()
+            source.write_bytes(struct.pack("<Q", len(data)) + data)
+            return source
+
+        def weights(value):
+            index.write_text(json.dumps({"weight_map": value}))
+            return index
+
+        source.write_bytes(b"short")
+        expect(source, "missing safetensors header length")
+        source.write_bytes(struct.pack("<Q", 20) + b"{}")
+        expect(source, "invalid safetensors header length")
+        # Sparse file: isolate the size cap from the independent file-size check.
+        with source.open("wb") as stream:
+            stream.write(struct.pack("<Q", 100_000_001) + b"{}")
+            stream.truncate(100_000_009)
+        expect(source, "invalid safetensors header length")
+        expect(header([]), "header must be an object")
+        for info in ([], {"dtype": 1, "shape": [512, 256]},
+                     {"dtype": "F32", "shape": "512,256"},
+                     {"dtype": "F32", "shape": {}},
+                     {"dtype": "F32", "shape": [True, 256]},
+                     {"dtype": "F32", "shape": [-1, 256]}):
+            expect(header({name: info}), "invalid tensor header for " + name)
+        expect(header({}), "empty safetensors source; nothing compared")
+        index.write_text("[]")
+        expect(index, "index must be an object")
+        expect(weights({}), "empty or missing weight_map; nothing compared")
+        expect(weights([]), "empty or missing weight_map; nothing compared")
+        expect(weights({name: 1}), "invalid shard for " + name)
+
+        write_shard(source, {name: [512, 256]})
+        expect(weights({"absent.weight": source.name}), "absent from declared shard")
+        write_shard(source, {name: [512, 256], "extra.weight": [1]})
+        expect(weights({name: source.name}), "extra.weight in source.safetensors is not indexed there")
+        for shard in (str(source.resolve()), "../source.safetensors",
+                      "sub/source.safetensors", "sub\\source.safetensors",
+                      "C:\\source.safetensors", "source.bin"):
+            expect(weights({name: shard}), "shard must be a bare .safetensors filename")
+
+        # A legal basename must not escape through a symlink either.
+        with tempfile.TemporaryDirectory() as outside:
+            target = Path(outside) / "outside.safetensors"
+            write_shard(target, {name: [512, 256]})
+            link = directory / "linked.safetensors"
+            try:
+                link.symlink_to(target)
+            except OSError as error:
+                if getattr(error, "winerror", None) != 1314:
+                    raise
+                print("SKIP: symlink containment test (Windows requires symlink privileges)")
+            else:
+                expect(weights({name: link.name}), "shard resolves outside index directory")
+
+        data = b"[" * 200_000 + b"]" * 200_000
+        source.write_bytes(struct.pack("<Q", len(data)) + data)
+        expect(source, "ERROR:")
+        write_shard(source, {name: [512, 256]})
+        for blocks in (0, 1025):
+            path = directory / f"blocks-{blocks}.gguf"
+            writer = gguf.GGUFWriter(str(path), "llada")
+            writer.add_uint32("llada.block_count", blocks)
+            writer.write_header_to_file()
+            writer.write_kv_data_to_file()
+            writer.write_tensors_to_file()
+            writer.close()
+            expect(source, "llada.block_count must be between 1 and 1024", gguf_path=path)
+
+        reader = gguf.GGUFReader(str(model))
+        mapper = name_map(reader)
+        aliases = [n + ".weight" for n in mapper.mapping
+                   if mapper.get_name(n + ".weight", try_suffixes=(".weight",)) == "token_embd.weight"]
+        assert len(aliases) >= 2
+        write_shard(source, {aliases[0]: [512, 256], aliases[1]: [512, 256]})
+        expect(source, "duplicates GGUF target token_embd.weight", status=1)
+    return runs
+
+
 def self_test() -> None:
     fixtures = Path(__file__).resolve().parent.parent / "tests/fixtures"
     runs = 0
@@ -194,6 +299,7 @@ def self_test() -> None:
                     code = compare(gguf_path or model, source, ignore)
                 assert code == status and message in captured.getvalue(), captured.getvalue()
                 runs += 1
+                return captured.getvalue()
 
             expect(write_twin(directory, shapes), 0, f"compared {expected}, ok {expected}")
             single = directory / "single.safetensors"
@@ -230,14 +336,17 @@ def self_test() -> None:
             expect(write_twin(directory, changed), 0, f"compared {expected}", r"rotary\.inv_freq$")
             empty = directory / "empty.json"
             empty.write_text('{"weight_map": {}}')
-            expect(empty, 2, "nothing compared")
+            expect(empty, 2, "empty or missing weight_map; nothing compared")
             expect(directory / "absent.safetensors", 2, "ERROR:")
             expect(single, 2, "compared 0", ".*")
+            report = expect(single, 0, f"compared {expected - 1}, ok {expected - 1}", "^" + re.escape(embedding) + "$")
+            assert "ignored 1" in report
             captured = io.StringIO()
             with contextlib.redirect_stdout(captured):
                 status = compare(fixtures / "kquants.gguf", single)
             assert status == 2 and "no tensor name map" in captured.getvalue()
             runs += 1
+    runs += self_test_inputs(fixtures)
     print(f"check_weights self-test: {runs} cases passed (LLaDA 21, Dream 27 tensors)")
 
 

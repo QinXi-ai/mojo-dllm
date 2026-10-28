@@ -343,6 +343,8 @@ def metadata_cases() -> None:
     write("key-length", {"llada.attention.key_length": 64})
     write("rope-type", {"llada.rope.scaling.type": "yarn"})
     write("rope-factor", {"llada.rope.scaling.factor": 4.0})
+    write("rope-width-type", {"llada.rope.dimension_count": "128"})
+    write("rope-factor-type", {"llada.rope.scaling.factor": "1.0"})
     write("defaults")
     for kind in ("none", "linear"):
         write("compatible-" + kind, {"llada.rope.dimension_count": 128,
