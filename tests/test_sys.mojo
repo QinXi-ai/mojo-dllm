@@ -78,9 +78,19 @@ def test_mapping_empty_file() raises:
 
 
 def test_mapping_rejects_directory() raises:
-    # Linux WSL2/9p: open and lseek succeed, mmap rejects the directory.
-    with assert_raises(contains="mmap failed for tests/fixtures"):
+    # Depending on the filesystem, open, lseek, or mmap can reject directories.
+    var rejected = False
+    try:
         _ = Mapping("tests/fixtures")
+    except e:
+        var message = String(e)
+        assert_true(
+            message == "cannot open file: tests/fixtures"
+            or message == "file is empty or unreadable: tests/fixtures"
+            or message == "mmap failed for tests/fixtures"
+        )
+        rejected = True
+    assert_true(rejected, "mapping a directory must fail")
 
 
 def test_page_ranges() raises:
@@ -95,9 +105,8 @@ def test_page_ranges() raises:
     var aligned_lo, aligned_hi = drop_range(4096, 4096)
     assert_equal(aligned_lo, 4096)
     assert_equal(aligned_hi, 8192)
-    var m = Mapping("tests/fixtures/bad-magic.gguf")
-    m.drop(m.addr + 1, 10)
-    assert_equal(m.ptr().unsafe_load(0), UInt8(0x47))
+    # Read-back after madvise cannot establish whether a page was dropped:
+    # file-backed mappings read the same bytes again. Test the range directly.
 
 
 def check_parallel(n: Int, threads: Int) raises:

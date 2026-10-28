@@ -47,6 +47,16 @@ def test_rejects_oversized_key() raises:
         _ = GGUFFile(FIX + "key-length.gguf")
 
 
+def test_rejects_key_length_that_wraps_negative() raises:
+    with assert_raises(contains="GGUF file truncated"):
+        _ = GGUFFile(FIX + "key-length-negative.gguf")
+
+
+def test_accepts_last_read_ending_exactly_at_eof() raises:
+    var g = GGUFFile(FIX + "exact-eof.gguf")
+    assert_equal(g.n_tensors(), 0)
+
+
 def test_rejects_version_one() raises:
     with assert_raises(contains="unsupported GGUF version 1"):
         _ = GGUFFile(FIX + "version-1.gguf")
