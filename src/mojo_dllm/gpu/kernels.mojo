@@ -12,7 +12,7 @@ to int8 with one f32 scale per 32 values (llama.cpp's Q8_1 shape), so a
 
 The integer sums run on the int8 tensor cores (`mma.sync`, sm_80 and newer).
 Q6_K blocks are 210 bytes, which leaves every other block 2-byte aligned;
-upload pads them to 212 so all weight loads are aligned 32-bit words.
+upload pads them to 224, so every 16-byte chunk of a block is aligned.
 """
 
 from std.math import exp, sqrt, round
@@ -30,16 +30,19 @@ from max.gpu.primitives.warp import (
 )
 
 from mojo_dllm.formats.gguf import GGML_Q4_K, GGML_Q6_K, ggml_type_name
-from mojo_dllm.sys.mem import F32Ptr, I8Ptr, I32Ptr, U8Ptr
+from mojo_dllm.sys.mem import F32Ptr, F64Ptr, I8Ptr, I32Ptr, U8Ptr
 
 comptime QK = 32
 """Activation values per int8 scale."""
 comptime Q4K_BYTES = 144
 comptime Q6K_BYTES = 210
-comptime Q6K_STAGED = 212
+comptime Q6K_STAGED = 224
 comptime NT = 256
 comptime SharedF32 = Pointer[
     Float32, MutUntrackedOrigin, address_space=AddressSpace.SHARED
+]
+comptime SharedF64 = Pointer[
+    Float64, MutUntrackedOrigin, address_space=AddressSpace.SHARED
 ]
 
 
@@ -62,6 +65,11 @@ def dev_i8(b: DeviceBuffer[DType.int8]) -> I8Ptr:
 @always_inline
 def dev_i32(b: DeviceBuffer[DType.int32]) -> I32Ptr:
     return I32Ptr(unsafe_from_address=Int(b.unsafe_ptr()))
+
+
+@always_inline
+def dev_f64(b: DeviceBuffer[DType.float64]) -> F64Ptr:
+    return F64Ptr(unsafe_from_address=Int(b.unsafe_ptr()))
 
 
 @always_inline
@@ -443,6 +451,142 @@ def attention_gpu(
         )
 
 
+# ------------------------------------------------------------- row statistics
+
+comptime RS_THREADS = 256
+"""Threads per block of the row-statistics kernel (a power of two)."""
+comptime RS_FIELDS = 4
+"""f64 values written per row: max, sum, runner-up, weighted sum."""
+
+
+@always_inline
+def _block_sum_f64(red: SharedF64, v: Float64, th: Int) -> Float64:
+    """Sum over RS_THREADS threads; every thread gets the total."""
+    red[unsafe_offset=th] = v
+    barrier()
+    var s = RS_THREADS // 2
+    while s > 0:
+        if th < s:
+            red[unsafe_offset=th] = (
+                red[unsafe_offset=th] + red[unsafe_offset=th + s]
+            )
+        barrier()
+        s //= 2
+    var r = red[unsafe_offset=0]
+    barrier()
+    return r
+
+
+@always_inline
+def _block_max_f64(red: SharedF64, v: Float64, th: Int) -> Float64:
+    """Max over RS_THREADS threads; every thread gets the result."""
+    red[unsafe_offset=th] = v
+    barrier()
+    var s = RS_THREADS // 2
+    while s > 0:
+        if th < s:
+            red[unsafe_offset=th] = max(
+                red[unsafe_offset=th], red[unsafe_offset=th + s]
+            )
+        barrier()
+        s //= 2
+    var r = red[unsafe_offset=0]
+    barrier()
+    return r
+
+
+def _row_stats_kernel(logits: F32Ptr, vocab: Int32, tok: I32Ptr, stats: F64Ptr):
+    """Reduce one logits row (block b reads row b) to what the samplers score.
+
+    tok[b] is the first index of the maximum, as the host argmax picks it.
+    stats[4b ..] holds, with m the maximum and e_v = exp(logit_v - m):
+    m, sum e_v, the largest logit at any index other than tok[b], and
+    sum e_v (logit_v - m). Sums are f64; the exponentials are f32.
+    """
+    var sv = unsafe_stack_allocation[
+        RS_THREADS, Float32, address_space=AddressSpace.SHARED
+    ]()
+    var si = unsafe_stack_allocation[
+        RS_THREADS, Int32, address_space=AddressSpace.SHARED
+    ]()
+    var red = unsafe_stack_allocation[
+        RS_THREADS, Float64, address_space=AddressSpace.SHARED
+    ]()
+    var th = Int(thread_idx.x)
+    var n = Int(vocab)
+    var row = logits.unsafe_offset(Int(block_idx.x) * n)
+    # First index of the maximum: a larger value wins, a tie goes to the
+    # smaller index.
+    var bv = Float32.MIN
+    var bi = Int32.MAX
+    for v in range(th, n, RS_THREADS):
+        var x = row[unsafe_offset=v]
+        if x > bv:
+            bv = x
+            bi = Int32(v)
+    sv[unsafe_offset=th] = bv
+    si[unsafe_offset=th] = bi
+    barrier()
+    var s = RS_THREADS // 2
+    while s > 0:
+        if th < s:
+            var v2 = sv[unsafe_offset=th + s]
+            var i2 = si[unsafe_offset=th + s]
+            var v1 = sv[unsafe_offset=th]
+            var i1 = si[unsafe_offset=th]
+            if v2 > v1 or (v2 == v1 and i2 < i1):
+                sv[unsafe_offset=th] = v2
+                si[unsafe_offset=th] = i2
+        barrier()
+        s //= 2
+    var m = sv[unsafe_offset=0]
+    var best = Int(si[unsafe_offset=0])
+    if best == Int(Int32.MAX):
+        # No value beat the sentinel (a row of NaN): the host loop's answer.
+        best = 0
+    barrier()
+    var z = Float64(0)
+    var a = Float64(0)
+    var second = Float64(-1e300)
+    for v in range(th, n, RS_THREADS):
+        var x = row[unsafe_offset=v]
+        var dx = x - m
+        var e = Float64(exp(dx))
+        z += e
+        a += e * Float64(dx)
+        if v != best:
+            second = max(second, Float64(x))
+    z = _block_sum_f64(red, z, th)
+    a = _block_sum_f64(red, a, th)
+    second = _block_max_f64(red, second, th)
+    if th == 0:
+        var b = Int(block_idx.x)
+        tok[unsafe_offset=b] = Int32(best)
+        stats[unsafe_offset=RS_FIELDS * b] = Float64(m)
+        stats[unsafe_offset=RS_FIELDS * b + 1] = z
+        stats[unsafe_offset=RS_FIELDS * b + 2] = second
+        stats[unsafe_offset=RS_FIELDS * b + 3] = a
+
+
+def row_stats_gpu(
+    ctx: DeviceContext,
+    logits: F32Ptr,
+    n_rows: Int,
+    vocab: Int,
+    tok: I32Ptr,
+    stats: F64Ptr,
+) raises:
+    """Greedy token and softmax statistics of each of n_rows logits rows."""
+    ctx.enqueue_function[_row_stats_kernel](
+        logits,
+        Int32(vocab),
+        tok,
+        stats,
+        grid_dim=n_rows,
+        block_dim=RS_THREADS,
+    )
+
+
 # ---------------------------------------------------------------- elementwise
 
 
@@ -544,18 +688,17 @@ struct GpuQActs(Movable):
         self.s = ctx.enqueue_create_buffer[DType.float32](max_tokens * K // QK)
 
 
-def _quantize_kernel(
-    x: F32Ptr, q: I8Ptr, ds: F32Ptr, ss: F32Ptr, n_blocks: Int32
+@always_inline
+def _quantize_lane(
+    v: Float32, q: I8Ptr, ds: F32Ptr, ss: F32Ptr, i: Int, b: Int
 ):
-    # One warp per 32-value block, one value per lane, so loads and stores
-    # are coalesced. max and an integer sum do not depend on the order of
-    # the reduction, so the result is the same as a sequential loop's.
-    # QK is 32, the warp width.
-    var b = Int(block_idx.x) * (NT // 32) + Int(warp_id())
-    if b >= Int(n_blocks):
-        return
-    var i = b * QK + Int(lane_id())
-    var v = x[unsafe_offset=i]
+    """Lane `lane_id()` of a warp quantizes value i of the 32-value block b.
+
+    All 32 lanes of the warp call it together: max and an integer sum do not
+    depend on the order of the reduction, so the result is the same as a
+    sequential loop's. The plain and the fused kernels share this code, which
+    is what keeps a fused kernel's output identical to the chain it replaces.
+    """
     var amax = warp_max(abs(v))
     var d = amax / 127.0
     var inv = Float32(0) if amax == 0 else 127.0 / amax
@@ -567,6 +710,18 @@ def _quantize_kernel(
         ss[unsafe_offset=b] = d * Float32(sum)
 
 
+def _quantize_kernel(
+    x: F32Ptr, q: I8Ptr, ds: F32Ptr, ss: F32Ptr, n_blocks: Int32
+):
+    # One warp per 32-value block, one value per lane, so loads and stores
+    # are coalesced. QK is 32, the warp width.
+    var b = Int(block_idx.x) * (NT // 32) + Int(warp_id())
+    if b >= Int(n_blocks):
+        return
+    var i = b * QK + Int(lane_id())
+    _quantize_lane(x[unsafe_offset=i], q, ds, ss, i, b)
+
+
 def quantize_gpu(
     ctx: DeviceContext, x: F32Ptr, n_tokens: Int, K: Int, qa: GpuQActs
 ) raises:
@@ -575,6 +730,184 @@ def quantize_gpu(
     var nb = n_tokens * K // QK
     ctx.enqueue_function[_quantize_kernel](
         x,
+        dev_i8(qa.q),
+        dev_f32(qa.d),
+        dev_f32(qa.s),
+        Int32(nb),
+        grid_dim=_cdiv(nb, NT // 32),
+        block_dim=NT,
+    )
+
+
+# ------------------------------------------------- fused elementwise kernels
+#
+# Each fused kernel evaluates the same f32 expressions, in the same order, as
+# the kernels it replaces, so its output matches the chain bit for bit
+# (tests/gpu/test_gpu.mojo compares them exactly).
+
+
+def _norm_quantize_pass(
+    row: F32Ptr,
+    w: F32Ptr,
+    inv: Float32,
+    q: I8Ptr,
+    ds: F32Ptr,
+    ss: F32Ptr,
+    d: Int,
+    row_off: Int,
+):
+    """Quantize row * inv * w. Thread t takes values t, t + NT, ...: a warp
+    holds 32 consecutive values at each step, which is one quantization block.
+    d is a multiple of 32, so a warp is either inside the row or outside it.
+    """
+    var k = 0
+    while k < d:
+        var base = k + Int(warp_id()) * 32
+        if base < d:
+            var i = base + Int(lane_id())
+            var v = row[unsafe_offset=i] * inv * w[unsafe_offset=i]
+            _quantize_lane(v, q, ds, ss, row_off + i, (row_off + base) // 32)
+        k += NT
+
+
+def _rmsnorm_quantize_kernel(
+    x: F32Ptr,
+    w: F32Ptr,
+    q: I8Ptr,
+    ds: F32Ptr,
+    ss: F32Ptr,
+    dim: Int32,
+    eps: Float32,
+):
+    var red = unsafe_stack_allocation[
+        NT // 32, Float32, address_space=AddressSpace.SHARED
+    ]()
+    var d = Int(dim)
+    var row_off = Int(block_idx.x) * d
+    var row = x.unsafe_offset(row_off)
+    var sq = Float32(0)
+    var i = Int(thread_idx.x)
+    while i < d:
+        var v = row[unsafe_offset=i]
+        sq += v * v
+        i += NT
+    var total = _block_sum(sq, red)
+    var inv = 1.0 / sqrt(total / Float32(d) + eps)
+    _norm_quantize_pass(row, w, inv, q, ds, ss, d, row_off)
+
+
+def _add_rmsnorm_quantize_kernel(
+    x: F32Ptr,
+    h: F32Ptr,
+    w: F32Ptr,
+    q: I8Ptr,
+    ds: F32Ptr,
+    ss: F32Ptr,
+    dim: Int32,
+    eps: Float32,
+):
+    var red = unsafe_stack_allocation[
+        NT // 32, Float32, address_space=AddressSpace.SHARED
+    ]()
+    var d = Int(dim)
+    var row_off = Int(block_idx.x) * d
+    var row = x.unsafe_offset(row_off)
+    var hrow = h.unsafe_offset(row_off)
+    var sq = Float32(0)
+    var i = Int(thread_idx.x)
+    while i < d:
+        var v = row[unsafe_offset=i] + hrow[unsafe_offset=i]
+        row[unsafe_offset=i] = v
+        sq += v * v
+        i += NT
+    # The second pass reads back the values this same thread wrote.
+    var total = _block_sum(sq, red)
+    var inv = 1.0 / sqrt(total / Float32(d) + eps)
+    _norm_quantize_pass(row, w, inv, q, ds, ss, d, row_off)
+
+
+def _silu_mul_quantize_kernel(
+    g: F32Ptr, u: F32Ptr, q: I8Ptr, ds: F32Ptr, ss: F32Ptr, n_blocks: Int32
+):
+    var b = Int(block_idx.x) * (NT // 32) + Int(warp_id())
+    if b >= Int(n_blocks):
+        return
+    var i = b * QK + Int(lane_id())
+    var a = g[unsafe_offset=i]
+    _quantize_lane(a / (1.0 + exp(-a)) * u[unsafe_offset=i], q, ds, ss, i, b)
+
+
+def _check_quant_shape(qa: GpuQActs, n_tokens: Int, K: Int) raises:
+    if K != qa.K or n_tokens > qa.max_tokens or K % QK != 0:
+        raise Error("activation buffer is the wrong shape")
+
+
+def rmsnorm_quantize_gpu(
+    ctx: DeviceContext,
+    x: F32Ptr,
+    w: F32Ptr,
+    qa: GpuQActs,
+    rows: Int,
+    dim: Int,
+    eps: Float32,
+) raises:
+    """quantize(rmsnorm(x)) in one launch; the normalized f32 rows are not
+    stored."""
+    _check_quant_shape(qa, rows, dim)
+    ctx.enqueue_function[_rmsnorm_quantize_kernel](
+        x,
+        w,
+        dev_i8(qa.q),
+        dev_f32(qa.d),
+        dev_f32(qa.s),
+        Int32(dim),
+        eps,
+        grid_dim=rows,
+        block_dim=NT,
+    )
+
+
+def add_rmsnorm_quantize_gpu(
+    ctx: DeviceContext,
+    x: F32Ptr,
+    h: F32Ptr,
+    w: F32Ptr,
+    qa: GpuQActs,
+    rows: Int,
+    dim: Int,
+    eps: Float32,
+) raises:
+    """x += h, then quantize(rmsnorm(x)), in one launch. x keeps the sum (it
+    is the residual stream); the normalized f32 rows are not stored."""
+    _check_quant_shape(qa, rows, dim)
+    ctx.enqueue_function[_add_rmsnorm_quantize_kernel](
+        x,
+        h,
+        w,
+        dev_i8(qa.q),
+        dev_f32(qa.d),
+        dev_f32(qa.s),
+        Int32(dim),
+        eps,
+        grid_dim=rows,
+        block_dim=NT,
+    )
+
+
+def silu_mul_quantize_gpu(
+    ctx: DeviceContext,
+    g: F32Ptr,
+    u: F32Ptr,
+    qa: GpuQActs,
+    rows: Int,
+    dim: Int,
+) raises:
+    """quantize(silu(g) * u) in one launch; g and u are left as they were."""
+    _check_quant_shape(qa, rows, dim)
+    var nb = rows * dim // QK
+    ctx.enqueue_function[_silu_mul_quantize_kernel](
+        g,
+        u,
         dev_i8(qa.q),
         dev_f32(qa.d),
         dev_f32(qa.s),
@@ -606,7 +939,7 @@ def staged_matrix_bytes(ggml_type: Int, N: Int, K: Int) raises -> Int:
 def stage_matrix(
     src_addr: Int, ggml_type: Int, N: Int, K: Int, dst: U8Ptr
 ) raises:
-    """Copy a GGUF matrix into its device layout (Q6_K padded to 212-byte blocks).
+    """Copy a GGUF matrix into its device layout (Q6_K padded to 224-byte blocks).
     """
     var src = U8Ptr(unsafe_from_address=src_addr)
     var blocks = N * K // 256
@@ -620,8 +953,8 @@ def stage_matrix(
             var d = dst.unsafe_offset(b * Q6K_STAGED)
             for i in range(Q6K_BYTES):
                 d[unsafe_offset=i] = s[unsafe_offset=i]
-            d[unsafe_offset=210] = 0
-            d[unsafe_offset=211] = 0
+            for i in range(Q6K_BYTES, Q6K_STAGED):
+                d[unsafe_offset=i] = 0
         return
     raise Error(
         "the GPU backend has no matrix kernel for " + ggml_type_name(ggml_type)
@@ -650,8 +983,6 @@ comptime BN_MAX = 80
 comptime GEMM_THREADS = 128
 comptime WS4 = 9
 """Shared row stride of the Q4_K sub-block scales (8 used)."""
-comptime WS6 = 17
-"""Shared row stride of the Q6_K group scales (16 used)."""
 comptime SW = 68
 """Shared row stride in 32-bit words: 256 bytes plus 16 of padding, so the 8
 rows a fragment load touches fall in different banks."""
@@ -832,6 +1163,119 @@ def _q4k_scale(h: SIMD[DType.int32, 4], j: Int) -> Tuple[Float32, Float32]:
     return (d * Float32(sc), -dmin * Float32(mn))
 
 
+comptime Q4K_WR = (BM4 * 9 + Q4K_THREADS - 1) // Q4K_THREADS
+"""16-byte weight chunks each thread stages per super-block."""
+
+
+@always_inline
+def _q4k_load(
+    w: U8Ptr, row_bytes: Int, r0: Int, n_rows: Int, b: Int, th: Int
+) -> Array[SIMD[DType.int32, 4], Q4K_WR]:
+    """This thread's 16-byte chunks of super-block b: header, then nibbles."""
+    var v = Array[SIMD[DType.int32, 4], Q4K_WR](fill=SIMD[DType.int32, 4](0))
+    comptime for rep in range(Q4K_WR):
+        var unit = th + rep * Q4K_THREADS
+        var row = unit // 9
+        if unit < BM4 * 9 and r0 + row < n_rows:
+            v[rep] = (
+                w.unsafe_offset(
+                    (r0 + row) * row_bytes + b * Q4K_BYTES + (unit % 9) * 16
+                )
+                .unsafe_bitcast[Int32]()
+                .unsafe_load[width=4, alignment=16]()
+            )
+    return v^
+
+
+@always_inline
+def _q4k_store(
+    v: Array[SIMD[DType.int32, 4], Q4K_WR],
+    sWq: SharedI32,
+    sWh: SharedI32,
+    th: Int,
+):
+    comptime for rep in range(Q4K_WR):
+        var unit = th + rep * Q4K_THREADS
+        if unit < BM4 * 9:
+            var row = unit // 9
+            var c = unit % 9
+            if c == 0:
+                sWh.unsafe_offset(row * 4).unsafe_store[alignment=16](v[rep])
+            else:
+                sWq.unsafe_offset(row * SWQ + (c - 1) * 4).unsafe_store[
+                    alignment=16
+                ](v[rep])
+
+
+@always_inline
+def _acts_load[
+    BN: Int, NTH: Int
+](aq: I8Ptr, k: Int, T: Int, t0: Int, b: Int, th: Int) -> Array[
+    SIMD[DType.int32, 4], (BN * 16 + NTH - 1) // NTH
+]:
+    """This thread's 16-byte chunks of BN tokens' activations, super-block b."""
+    comptime R = (BN * 16 + NTH - 1) // NTH
+    var v = Array[SIMD[DType.int32, 4], R](fill=SIMD[DType.int32, 4](0))
+    comptime for rep in range(R):
+        var unit = th + rep * NTH
+        var tok = unit >> 4
+        if unit < BN * 16 and t0 + tok < T:
+            v[rep] = (
+                aq.unsafe_offset((t0 + tok) * k + b * 256 + (unit & 15) * 16)
+                .unsafe_bitcast[Int32]()
+                .unsafe_load[width=4, alignment=16]()
+            )
+    return v^
+
+
+@always_inline
+def _acts_store[
+    BN: Int, NTH: Int
+](
+    v: Array[SIMD[DType.int32, 4], (BN * 16 + NTH - 1) // NTH],
+    sA: SharedI32,
+    th: Int,
+):
+    comptime for rep in range((BN * 16 + NTH - 1) // NTH):
+        var unit = th + rep * NTH
+        if unit < BN * 16:
+            sA.unsafe_offset((unit >> 4) * SW + (unit & 15) * 4).unsafe_store[
+                alignment=16
+            ](v[rep])
+
+
+@always_inline
+def _scales_load[
+    BN: Int, NTH: Int
+](ad: F32Ptr, as_: F32Ptr, k: Int, T: Int, t0: Int, b: Int, th: Int) -> Array[
+    Float32, 2 * ((BN * 8 + NTH - 1) // NTH)
+]:
+    """(d, s) of this thread's (token, sub-block) pairs, super-block b."""
+    comptime R = (BN * 8 + NTH - 1) // NTH
+    var v = Array[Float32, 2 * R](fill=0)
+    var nsub = k // QK
+    comptime for e in range(R):
+        var idx = th + e * NTH
+        var tk = idx >> 3
+        if idx < BN * 8 and t0 + tk < T:
+            var src = (t0 + tk) * nsub + b * 8 + (idx & 7)
+            v[2 * e] = ad[unsafe_offset=src]
+            v[2 * e + 1] = as_[unsafe_offset=src]
+    return v^
+
+
+@always_inline
+def _scales_store[
+    BN: Int, NTH: Int
+](v: Array[Float32, 2 * ((BN * 8 + NTH - 1) // NTH)], sAds: SharedF32, th: Int):
+    comptime for e in range((BN * 8 + NTH - 1) // NTH):
+        var idx = th + e * NTH
+        if idx < BN * 8:
+            var o = ((idx & 7) * BN + (idx >> 3)) * 2
+            sAds[unsafe_offset=o] = v[2 * e]
+            sAds[unsafe_offset=o + 1] = v[2 * e + 1]
+
+
 def _q4k_mma_kernel[
     BN: Int
 ](
@@ -881,30 +1325,21 @@ def _q4k_mma_kernel[
     var acc = Array[Float32, 4 * NT8](fill=0)
     var ra = 16 * warp + g
     var rb = ra + 8
-    for b in range(k // 256):
-        # ---- stage: 9 chunks of 16 bytes per row (header, then 8 of nibbles)
-        comptime for rep in range((BM4 * 9 + Q4K_THREADS - 1) // Q4K_THREADS):
-            var unit = th + rep * Q4K_THREADS
-            if unit < BM4 * 9:
-                var row = unit // 9
-                var c = unit % 9
-                var v = SIMD[DType.int32, 4](0)
-                if r0 + row < n_rows:
-                    v = (
-                        w.unsafe_offset(
-                            (r0 + row) * row_bytes + b * Q4K_BYTES + c * 16
-                        )
-                        .unsafe_bitcast[Int32]()
-                        .unsafe_load[width=4, alignment=16]()
-                    )
-                if c == 0:
-                    sWh.unsafe_offset(row * 4).unsafe_store[alignment=16](v)
-                else:
-                    sWq.unsafe_offset(row * SWQ + (c - 1) * 4).unsafe_store[
-                        alignment=16
-                    ](v)
-        _stage_acts16[BN, Q4K_THREADS](aq, ad, as_, k, n_tok, t0, b, sA, sAds)
+    # Super-block b + 1 is read from global memory into registers while b
+    # runs on the tensor cores, so the loads can overlap with compute.
+    var nb = k // 256
+    var wv = _q4k_load(w, row_bytes, r0, n_rows, 0, th)
+    var av = _acts_load[BN, Q4K_THREADS](aq, k, n_tok, t0, 0, th)
+    var dv = _scales_load[BN, Q4K_THREADS](ad, as_, k, n_tok, t0, 0, th)
+    for b in range(nb):
+        _q4k_store(wv, sWq, sWh, th)
+        _acts_store[BN, Q4K_THREADS](av, sA, th)
+        _scales_store[BN, Q4K_THREADS](dv, sAds, th)
         barrier()
+        if b + 1 < nb:
+            wv = _q4k_load(w, row_bytes, r0, n_rows, b + 1, th)
+            av = _acts_load[BN, Q4K_THREADS](aq, k, n_tok, t0, b + 1, th)
+            dv = _scales_load[BN, Q4K_THREADS](ad, as_, k, n_tok, t0, b + 1, th)
         # ---- tensor cores
         var ha = sWh.unsafe_offset(ra * 4).unsafe_load[width=4, alignment=16]()
         var hb = sWh.unsafe_offset(rb * 4).unsafe_load[width=4, alignment=16]()
@@ -972,6 +1407,63 @@ def _store_tile[
                 dst[unsafe_offset=tk * ldo + r] = acc[nt * 4 + e]
 
 
+comptime Q6K_THREADS = GEMM_THREADS
+comptime Q6K_CHUNKS = Q6K_STAGED // 16
+"""16-byte chunks of a staged Q6_K block: 8 of low nibbles, 4 of high bits, one
+of scales, one holding d."""
+comptime SWQ6 = 60
+"""Shared row stride of a Q6_K block in 32-bit words: 56 plus 4 of padding, so
+the 8 rows a fragment load reads fall in different banks."""
+comptime Q6K_WR = (BM * Q6K_CHUNKS + Q6K_THREADS - 1) // Q6K_THREADS
+"""16-byte weight chunks each thread stages per super-block."""
+
+
+@always_inline
+def _q6k_load(
+    w: U8Ptr, row_bytes: Int, r0: Int, n_rows: Int, b: Int, th: Int
+) -> Array[SIMD[DType.int32, 4], Q6K_WR]:
+    """This thread's 16-byte chunks of super-block b of rows r0..r0 + BM - 1."""
+    var v = Array[SIMD[DType.int32, 4], Q6K_WR](fill=SIMD[DType.int32, 4](0))
+    comptime for rep in range(Q6K_WR):
+        var unit = th + rep * Q6K_THREADS
+        var row = unit // Q6K_CHUNKS
+        if unit < BM * Q6K_CHUNKS and r0 + row < n_rows:
+            v[rep] = (
+                w.unsafe_offset(
+                    (r0 + row) * row_bytes
+                    + b * Q6K_STAGED
+                    + (unit % Q6K_CHUNKS) * 16
+                )
+                .unsafe_bitcast[Int32]()
+                .unsafe_load[width=4, alignment=16]()
+            )
+    return v^
+
+
+@always_inline
+def _q6k_store(v: Array[SIMD[DType.int32, 4], Q6K_WR], sW: SharedI32, th: Int):
+    comptime for rep in range(Q6K_WR):
+        var unit = th + rep * Q6K_THREADS
+        if unit < BM * Q6K_CHUNKS:
+            sW.unsafe_offset(
+                (unit // Q6K_CHUNKS) * SWQ6 + (unit % Q6K_CHUNKS) * 4
+            ).unsafe_store[alignment=16](v[rep])
+
+
+@always_inline
+def _q6k_frag(ql: Int32, qh: Int32, gg: Int) -> Int32:
+    """Four weights, minus 32, as sign-extended int8 lanes: group gg of a half
+    (weights 32gg..32gg + 31) takes its low four bits from the low or high
+    nibbles of a ql word and its top two from bits 2gg..2gg + 1 of qh."""
+    var nib = (ql >> Int32(4 * (gg >> 1))) & 0x0F0F0F0F
+    var hb = ((qh >> Int32(2 * gg)) & 0x03030303) << 4
+    # q - 32 for q in 0..63 is q ^ 32 read as a 6-bit signed value; widen
+    # bit 5 into bits 6 and 7 of each byte.
+    var v = (nib | hb) ^ 0x20202020
+    var sgn = v & 0x20202020
+    return v | (sgn << 1) | (sgn << 2)
+
+
 def _q6k_mma_kernel[
     BN: Int
 ](
@@ -985,15 +1477,20 @@ def _q6k_mma_kernel[
     dst: F32Ptr,
     ldo: Int32,
 ):
+    """Q6_K GEMM: BM weight rows by BN tokens per block, 4 warps.
+
+    Staging is a plain 16-byte copy of each row's 224-byte block (low nibbles,
+    high bits, scales, d) into sW. A warp unpacks its A fragments in
+    registers, one 16-weight group per mma.m16n8k16, with the scale of that
+    group. The next super-block is read into registers while this one runs on
+    the tensor cores. The accumulation order is the one the kernel had when it
+    unpacked during staging, so the output is unchanged.
+    """
     var sW = unsafe_stack_allocation[
-        BM * SW, Int32, address_space=AddressSpace.SHARED
+        BM * SWQ6, Int32, alignment=16, address_space=AddressSpace.SHARED
     ]()
     var sA = unsafe_stack_allocation[
-        BN * SW, Int32, address_space=AddressSpace.SHARED
-    ]()
-    # Row stride 17, not 16: rows g and g + 2 would share banks.
-    var sWs = unsafe_stack_allocation[
-        BM * WS6, Float32, address_space=AddressSpace.SHARED
+        BN * SW, Int32, alignment=16, address_space=AddressSpace.SHARED
     ]()
     var sAds = unsafe_stack_allocation[
         BN * 16, Float32, alignment=16, address_space=AddressSpace.SHARED
@@ -1009,73 +1506,74 @@ def _q6k_mma_kernel[
     var g = lane >> 2
     var t = lane & 3
     var row_bytes = (k // 256) * Q6K_STAGED
-    var srow = th >> 1
-    var h = th & 1
     comptime NT8 = BN // 8
     var acc = Array[Float32, 4 * NT8](fill=0)
-    for b in range(k // 256):
-        var wdst = sW.unsafe_offset(srow * SW)
-        if r0 + srow < n_rows:
-            # Half h of the super-block holds weights 128h..128h+127, as four
-            # 32-wide sub-blocks s8 = 4h + gg at positions 128h + 32gg + l.
-            var blk = w.unsafe_offset((r0 + srow) * row_bytes + b * Q6K_STAGED)
-            var ql = blk.unsafe_offset(64 * h).unsafe_bitcast[Int32]()
-            var qh = blk.unsafe_offset(128 + 32 * h).unsafe_bitcast[Int32]()
-            var d = _f16(blk, 208)
-            comptime for gg in range(4):
-                comptime for i in range(8):
-                    var nib = (
-                        ql[unsafe_offset=8 * (gg & 1) + i]
-                        >> Int32(4 * (gg >> 1))
-                    ) & 0x0F0F0F0F
-                    var hb = (
-                        (qh[unsafe_offset=i] >> Int32(2 * gg)) & 0x03030303
-                    ) << 4
-                    # q - 32 for q in 0..63 is q ^ 32 read as a 6-bit signed
-                    # value; widen bit 5 into bits 6 and 7 of each byte.
-                    var v = (nib | hb) ^ 0x20202020
-                    var sgn = v & 0x20202020
-                    wdst[unsafe_offset=(4 * h + gg) * 8 + i] = (
-                        v | (sgn << 1) | (sgn << 2)
-                    )
-                comptime for e in range(2):
-                    sWs[
-                        unsafe_offset=srow * WS6 + (4 * h + gg) * 2 + e
-                    ] = d * Float32(
-                        bitcast[DType.int8](
-                            blk[unsafe_offset=192 + 8 * h + 2 * gg + e]
-                        )
-                    )
-        else:
-            comptime for i in range(32):
-                wdst[unsafe_offset=h * 32 + i] = 0
-            comptime for e in range(8):
-                sWs[unsafe_offset=srow * WS6 + h * 8 + e] = 0
-        _stage_acts[BN](aq, ad, as_, k, n_tok, t0, b, sA, sAds)
+    var ra = 16 * warp + g
+    var rb = ra + 8
+    var nb = k // 256
+    var wv = _q6k_load(w, row_bytes, r0, n_rows, 0, th)
+    var av = _acts_load[BN, Q6K_THREADS](aq, k, n_tok, t0, 0, th)
+    var dv = _scales_load[BN, Q6K_THREADS](ad, as_, k, n_tok, t0, 0, th)
+    for b in range(nb):
+        _q6k_store(wv, sW, th)
+        _acts_store[BN, Q6K_THREADS](av, sA, th)
+        _scales_store[BN, Q6K_THREADS](dv, sAds, th)
         barrier()
-        var ra = (16 * warp + g) * SW
-        var rb = (16 * warp + g + 8) * SW
-        comptime for j in range(8):
-            comptime for e in range(2):
-                var a0 = sW[unsafe_offset=ra + j * 8 + e * 4 + t]
-                var a1 = sW[unsafe_offset=rb + j * 8 + e * 4 + t]
-                var ws0 = sWs[unsafe_offset=(16 * warp + g) * WS6 + 2 * j + e]
-                var ws1 = sWs[
-                    unsafe_offset=(16 * warp + g + 8) * WS6 + 2 * j + e
-                ]
-                comptime for nt in range(NT8):
-                    var c = _mma_k16(
-                        a0,
-                        a1,
-                        sA[unsafe_offset=(nt * 8 + g) * SW + j * 8 + e * 4 + t],
-                    )
-                    var q = sAds.unsafe_offset(
-                        (j * BN + nt * 8 + 2 * t) * 2
-                    ).unsafe_load[width=4, alignment=16]()
-                    acc[nt * 4 + 0] += ws0 * q[0] * Float32(c[0])
-                    acc[nt * 4 + 1] += ws0 * q[2] * Float32(c[1])
-                    acc[nt * 4 + 2] += ws1 * q[0] * Float32(c[2])
-                    acc[nt * 4 + 3] += ws1 * q[2] * Float32(c[3])
+        if b + 1 < nb:
+            wv = _q6k_load(w, row_bytes, r0, n_rows, b + 1, th)
+            av = _acts_load[BN, Q6K_THREADS](aq, k, n_tok, t0, b + 1, th)
+            dv = _scales_load[BN, Q6K_THREADS](ad, as_, k, n_tok, t0, b + 1, th)
+        # Row words: 0..31 low nibbles, 32..47 high bits, 48..51 the 16 group
+        # scales as int8, 52 holds d as f16.
+        var sa = sW.unsafe_offset(ra * SWQ6 + 48).unsafe_load[
+            width=4, alignment=16
+        ]()
+        var sb = sW.unsafe_offset(rb * SWQ6 + 48).unsafe_load[
+            width=4, alignment=16
+        ]()
+        var da = bitcast[DType.float16](
+            UInt16(Int(sW[unsafe_offset=ra * SWQ6 + 52]) & 0xFFFF)
+        ).cast[DType.float32]()
+        var db = bitcast[DType.float16](
+            UInt16(Int(sW[unsafe_offset=rb * SWQ6 + 52]) & 0xFFFF)
+        ).cast[DType.float32]()
+        comptime for J in range(16):
+            # Group J holds weights 16J..16J + 15: half hf, 32-wide sub-block
+            # gg of that half, 16-wide half lo of the sub-block.
+            comptime hf = J // 8
+            comptime gg = (J % 8) // 2
+            comptime lo = J % 2
+            var qla = sW[
+                unsafe_offset=ra * SWQ6 + 16 * hf + 8 * (gg & 1) + 4 * lo + t
+            ]
+            var qlb = sW[
+                unsafe_offset=rb * SWQ6 + 16 * hf + 8 * (gg & 1) + 4 * lo + t
+            ]
+            var qha = sW[unsafe_offset=ra * SWQ6 + 32 + 8 * hf + 4 * lo + t]
+            var qhb = sW[unsafe_offset=rb * SWQ6 + 32 + 8 * hf + 4 * lo + t]
+            var a0 = _q6k_frag(qla, qha, gg)
+            var a1 = _q6k_frag(qlb, qhb, gg)
+            var ws0 = da * Float32(
+                bitcast[DType.int8](
+                    UInt8((Int(sa[J // 4]) >> (8 * (J % 4))) & 0xFF)
+                )
+            )
+            var ws1 = db * Float32(
+                bitcast[DType.int8](
+                    UInt8((Int(sb[J // 4]) >> (8 * (J % 4))) & 0xFF)
+                )
+            )
+            comptime for nt in range(NT8):
+                var c = _mma_k16(
+                    a0, a1, sA[unsafe_offset=(nt * 8 + g) * SW + 4 * J + t]
+                )
+                var q = sAds.unsafe_offset(
+                    ((J // 2) * BN + nt * 8 + 2 * t) * 2
+                ).unsafe_load[width=4, alignment=16]()
+                acc[nt * 4 + 0] += ws0 * q[0] * Float32(c[0])
+                acc[nt * 4 + 1] += ws0 * q[2] * Float32(c[1])
+                acc[nt * 4 + 2] += ws1 * q[0] * Float32(c[2])
+                acc[nt * 4 + 3] += ws1 * q[2] * Float32(c[3])
         barrier()
     _store_tile[BN](acc, dst, Int(ldo), r0, t0, n_rows, n_tok, warp, g, t)
 

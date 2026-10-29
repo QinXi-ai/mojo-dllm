@@ -31,7 +31,7 @@ the reference.
 from std.math import exp, log
 from std.time import perf_counter_ns
 
-from mojo_dllm.models.transformer import DenoisingModel
+from mojo_dllm.models.transformer import DenoisingModel, RowStats
 from mojo_dllm.sys.mem import Bytes, F32Ptr, Floats
 from mojo_dllm.sys.parallel import parallel_for
 
@@ -328,7 +328,18 @@ def _generate_llada[
     for _ in range(cfg.gen_length):
         res.tokens.append(cfg.mask_id)
     var rng = Rng(cfg.seed)
-    var logits = Floats((L if cfg.full_logits else cfg.block_length) * vocab)
+    # Greedy decoding scores each row from four numbers the device reduces, so
+    # the logits never leave it. Gumbel noise needs the rows on the host, and
+    # `full_logits` exists to measure that copy.
+    var use_stats = (
+        cfg.temperature <= 0
+        and not cfg.full_logits
+        and model.device_row_stats()
+    )
+    var logits = Floats(
+        1 if use_stats else (L if cfg.full_logits else cfg.block_length) * vocab
+    )
+    var stats = RowStats()
     var t_start = perf_counter_ns()
 
     for b in range(num_blocks):
@@ -353,7 +364,10 @@ def _generate_llada[
                     rows.append(i)
             else:
                 rows = cand.copy()
-            model.forward(res.tokens, rows, logits.ptr())
+            if use_stats:
+                model.forward_stats(res.tokens, rows, stats)
+            else:
+                model.forward(res.tokens, rows, logits.ptr())
             res.forward_passes += 1
             var x0 = List[Int](capacity=len(cand))
             var conf = List[Float64](capacity=len(cand))
@@ -371,6 +385,13 @@ def _generate_llada[
                         conf.append(rng.uniform())
                     else:
                         conf.append(_prob_of(row, vocab, tok))
+            elif use_stats:
+                x0 = stats.tok.copy()
+                for j in range(len(cand)):
+                    if cfg.remasking == "random":
+                        conf.append(rng.uniform())
+                    else:
+                        conf.append(_confidence_from_stats(stats, j, "llada"))
             else:
                 var greedy = _greedy_rows(
                     logits.ptr(), row_of, vocab, "llada", cfg.threads
@@ -445,6 +466,20 @@ def _confidence(
     return (best, neg_h)
 
 
+def _confidence_from_stats(st: RowStats, j: Int, algorithm: String) -> Float64:
+    """`_confidence` (or, for "llada", `argmax_and_prob`'s probability) of row
+    j from its device reductions: p = 1 / z, the margin subtracts the
+    runner-up's probability, and the negative entropy is
+    sum e (x - m) / z - log z."""
+    var z = st.z[j]
+    var p_best = 1.0 / z
+    if algorithm == "llada" or algorithm == "maskgit_plus":
+        return p_best
+    if algorithm == "topk_margin":
+        return p_best - exp(st.second[j] - st.mx[j]) / z
+    return st.weighted[j] / z - log(z)
+
+
 def _generate_dream[
     M: DenoisingModel, O: StepObserver
 ](
@@ -489,7 +524,9 @@ def _generate_dream[
         res.tokens.append(t)
     for _ in range(cfg.gen_length):
         res.tokens.append(cfg.mask_id)
-    var logits = Floats(cfg.gen_length * vocab)
+    var use_stats = model.device_row_stats()
+    var logits = Floats(1 if use_stats else cfg.gen_length * vocab)
+    var stats = RowStats()
     var t_start = perf_counter_ns()
     for i in range(cfg.steps):
         var t_step = perf_counter_ns()
@@ -502,16 +539,25 @@ def _generate_dream[
         var rows = List[Int]()
         for p in cand:
             rows.append(model.logit_row(p))
-        model.forward(res.tokens, rows, logits.ptr())
-        res.forward_passes += 1
-        var row_of = List[Int](capacity=len(cand))
-        for j in range(len(cand)):
-            row_of.append(j)
-        var greedy = _greedy_rows(
-            logits.ptr(), row_of, vocab, algorithm, cfg.threads
-        )
-        var x0 = greedy[0].copy()
-        var conf = greedy[1].copy()
+        var x0 = List[Int]()
+        var conf = List[Float64]()
+        if use_stats:
+            model.forward_stats(res.tokens, rows, stats)
+            res.forward_passes += 1
+            x0 = stats.tok.copy()
+            for j in range(len(cand)):
+                conf.append(_confidence_from_stats(stats, j, algorithm))
+        else:
+            model.forward(res.tokens, rows, logits.ptr())
+            res.forward_passes += 1
+            var row_of = List[Int](capacity=len(cand))
+            for j in range(len(cand)):
+                row_of.append(j)
+            var greedy = _greedy_rows(
+                logits.ptr(), row_of, vocab, algorithm, cfg.threads
+            )
+            x0 = greedy[0].copy()
+            conf = greedy[1].copy()
         var n_transfer = len(cand)
         if i < cfg.steps - 1:
             var t = 1.0 - Float64(i) * (1.0 - cfg.eps) / Float64(cfg.steps)

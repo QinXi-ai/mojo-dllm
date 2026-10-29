@@ -10,6 +10,29 @@ semantic versioning (0.y: minor bumps may break things).
 
 - `scripts/check_weights.py` compares GGUF tensor shapes with safetensors
   headers, with LLaDA/Dream name mapping and a standalone self-test.
+- Q8_0 and Q5_K reference decoders, with GGUF type sizing and reference tests
+  for Q8_0, Q5_K and BF16. Matrix kernel support remains Q4_K and Q6_K.
+- Fused elementwise kernels on the GPU: the residual add, the RMSNorm and the
+  activation quantization run as one launch (three per layer boundary plus
+  the first norm), and `silu(g) * u` is quantized in the same launch as the
+  product. A layer goes from nine elementwise launches to four. Each fused
+  kernel evaluates the unfused kernels' f32 expressions in the same order, and
+  the GPU tests compare each against its chain bit for bit (issue #10).
+  LLaDA-8B at 148 tokens: 236.1 to 226.4 ms per forward (median of three
+  interleaved traces, `bench/profiles/2026-10-27-fuse-*`). The fused kernels
+  account for 5.7 ms of that and the rest is GEMM timing variation between
+  runs. The forward logits are identical (`bench/checks/2026-10-27-fuse-*`).
+- Greedy decoding scores each requested row on the GPU. One block per row
+  reduces its logits to the first argmax, the maximum, the sum of
+  exp(x - max), the runner-up logit and the sum of exp(x - max)(x - max); the
+  host turns those numbers into the LLaDA probability or Dream's entropy,
+  maskgit_plus and topk_margin confidence, so a step copies 36 bytes per
+  requested row instead of the logits rows. `--temperature` above 0 and
+  `--full-logits` keep the host path. Tests compare the kernel with the host
+  loops (issue #9). LLaDA-8B at 148 tokens: 250.5 to 234.3 ms per step, with the
+  forward pass unchanged (234.6 and 234.3 ms) and the forward logits identical
+  to main's (median of three interleaved traces,
+  `bench/profiles/2026-10-27-argmax-*`, `bench/checks/2026-10-27-argmax-*`).
 - Generation stops once the printed answer is final (an end-of-text token
   after a fully committed answer). The output is identical; `--no-early-stop`
   runs every step, and the harnesses pass it so comparisons stay step for
@@ -36,11 +59,27 @@ semantic versioning (0.y: minor bumps may break things).
 
 - Model configuration rejects incompatible RoPE widths/scaling and attention
   key lengths, and unsupported-architecture errors list LLaDA and Dream.
+- Matrix load errors name the tensor and distinguish an unsupported type from
+  a decodable type without matrix kernels; unsupported embeddings fail at load.
+- The Q6_K GPU GEMM copies each 224-byte block to shared memory as it is,
+  unpacks the A fragments in registers and prefetches the next super-block,
+  as the Q4_K kernel does. The staged block grows from 212 to 224 bytes (74.6
+  MB more device memory on LLaDA-8B). The accumulation order is unchanged.
+  LLaDA-8B at 148 tokens: 166.1 to 151.0 ms per forward, the Q6_K GEMM going
+  from 44.5 to 27.3 ms of kernel time (median of three interleaved traces,
+  `bench/profiles/2026-10-27-q6k-*`). The forward logits are identical
+  (`bench/checks/2026-10-27-q6k-*`; issue #11).
 - The Q4_K GPU GEMM keeps weights packed in shared memory and unpacks them
   in registers, staging with 16-byte copies; a block now covers 128 rows with
   8 warps. LLaDA-8B at 148 tokens: Q4_K GEMM 186.9 to 148.4 ms per forward
   in interleaved traces (`bench/profiles/2026-10-13-gemm3-*`), logits
   unchanged (`bench/checks/2026-10-13-gemm3-logits.json`).
+- The Q4_K GPU GEMM reads the next super-block into registers while the
+  tensor cores work on the current one. LLaDA-8B at 148 tokens: Q4_K GEMM
+  148.8 to 87.2 ms per forward (median launch time times launches, middle
+  value of three interleaved traces, `bench/profiles/2026-10-13-gemm4-*`),
+  logits unchanged
+  (`bench/checks/2026-10-13-gemm4-logits.json`).
 - GPU attention runs on the f16 tensor cores (`mma.m16n8k16`, f32
   accumulation): each warp takes 16 queries, and P goes from the score mma to
   the P V mma without leaving the registers. LLaDA-8B at 148 tokens:

@@ -39,7 +39,11 @@ from mojo_dllm.kernels.ops import (
     add_inplace,
     add_bias,
 )
-from mojo_dllm.quant.kquants import dequant_row
+from mojo_dllm.quant.kquants import (
+    dequant_row,
+    check_matrix_type,
+    check_embedding_type,
+)
 from mojo_dllm.sys.mem import F32Ptr, Floats
 
 
@@ -199,6 +203,7 @@ def _load_matrix(
             + String(rows)
             + "]"
         )
+    check_matrix_type(t)
     g.map.populate(g.data_addr(t), t.n_bytes)
     var pm = PackedMatrix(g.data_addr(t), t.ggml_type, rows, cols)
     g.map.drop(g.data_addr(t), t.n_bytes)
@@ -228,6 +233,29 @@ struct Timings(Copyable, ImplicitlyCopyable, Movable):
         self.forwards = 0
 
 
+struct RowStats(Copyable, Movable):
+    """Per requested row, what a greedy sampler needs from its logits.
+
+    With m the row maximum and e_v = exp(logit_v - m): the first argmax, m,
+    sum e_v, the largest logit at any other index, and sum e_v (logit_v - m).
+    The probability of the argmax is 1 / sum e_v; every Dream confidence is a
+    function of these four numbers.
+    """
+
+    var tok: List[Int]
+    var mx: List[Float64]
+    var z: List[Float64]
+    var second: List[Float64]
+    var weighted: List[Float64]
+
+    def __init__(out self):
+        self.tok = List[Int]()
+        self.mx = List[Float64]()
+        self.z = List[Float64]()
+        self.second = List[Float64]()
+        self.weighted = List[Float64]()
+
+
 trait DenoisingModel:
     """What the samplers need from a model, whichever device runs it."""
 
@@ -244,6 +272,17 @@ trait DenoisingModel:
     ) raises:
         """Logits for `out_rows` (ascending forward-pass rows), written as [len(out_rows), vocab].
         """
+        ...
+
+    def device_row_stats(self) -> Bool:
+        """Whether `forward_stats` reduces the logits on the device."""
+        ...
+
+    def forward_stats(
+        mut self, tokens: List[Int], out_rows: List[Int], mut out: RowStats
+    ) raises:
+        """Like `forward`, but returns each row's `RowStats` and never copies
+        the logits to the host."""
         ...
 
     def model_name(self) raises -> String:
@@ -293,6 +332,7 @@ struct DiffusionLM(DenoisingModel, Movable):
         self.threads = threads
         self.max_tokens = max_tokens
         self.embd = self.gguf.tensor("token_embd.weight")
+        check_embedding_type(self.embd)
         if self.embd.ne0 != c.hidden:
             raise Error(
                 "tensor shape mismatch for token_embd.weight: "
@@ -340,6 +380,14 @@ struct DiffusionLM(DenoisingModel, Movable):
         if self.cfg.shift_logits:
             return max(position - 1, 0)
         return position
+
+    def device_row_stats(self) -> Bool:
+        return False
+
+    def forward_stats(
+        mut self, tokens: List[Int], out_rows: List[Int], mut out: RowStats
+    ) raises:
+        raise Error("the CPU model has no device row statistics")
 
     def forward(
         mut self, tokens: List[Int], out_rows: List[Int], logits: F32Ptr

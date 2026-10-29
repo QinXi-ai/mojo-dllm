@@ -1,21 +1,22 @@
 from std.math import abs, sqrt
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 
 from mojo_dllm.formats.gguf import GGUFFile, TensorInfo
 from mojo_dllm.quant.kquants import dequant_row, f16_to_f32
 from mojo_dllm.kernels.qgemm import QActs, quantize_acts, qgemm
 from mojo_dllm.kernels.packed import PackedMatrix, pgemm
-from mojo_dllm.sys.mem import Floats, F32Ptr
+from mojo_dllm.sys.mem import Bytes, Floats, F32Ptr
 
 comptime FIX = "tests/fixtures/"
 
 
-def _expect_rows_match(g: GGUFFile, name: String, expected: String) raises:
+def _expect_rows_match(
+    g: GGUFFile, name: String, expected: String, rtol: Float32 = 0
+) raises:
     var t = g.tensor(name)
     var e = g.tensor(expected)
     var row = Floats(t.ne0)
     var ep = F32Ptr(unsafe_from_address=g.data_addr(e))
-    var worst = Float32(0)
     for r in range(t.n_rows()):
         dequant_row(
             t.ggml_type, g.data_addr(t) + r * t.row_bytes(), row.ptr(), t.ne0
@@ -23,9 +24,11 @@ def _expect_rows_match(g: GGUFFile, name: String, expected: String) raises:
         for i in range(t.ne0):
             var want = ep.unsafe_load(r * t.ne0 + i)
             var diff = abs(row[i] - want)
-            if diff > worst:
-                worst = diff
-    assert_true(worst <= 1e-6, name + " max abs diff " + String(worst))
+            assert_true(diff == diff, name + " produced NaN")
+            assert_true(
+                diff <= 1e-6 + rtol * abs(want),
+                name + " abs diff " + String(diff),
+            )
 
 
 def test_q4k_dequant_matches_reference() raises:
@@ -47,6 +50,56 @@ def test_f16_special_values() raises:
     assert_equal(f16_to_f32(0x3C00), 1.0)
     assert_equal(f16_to_f32(0xC000), -2.0)
     assert_equal(f16_to_f32(0x0000), 0.0)
+    assert_true(f16_to_f32(0x7C00) > Float32(3.4e38))
+    assert_equal(f16_to_f32(0x0001), Float32(5.960464477539063e-8))
+    var nan = f16_to_f32(0x7E00)
+    assert_true(nan != nan)
+
+
+def test_q8_0_dequant_matches_reference() raises:
+    var g = GGUFFile(FIX + "dequant-types.gguf")
+    _expect_rows_match(g, "q8_0", "q8_0.expected")
+
+
+def test_q5k_dequant_matches_reference() raises:
+    var g = GGUFFile(FIX + "dequant-types.gguf")
+    # Allow two f32 relative rounding steps; retain an absolute floor near zero.
+    _expect_rows_match(g, "q5k", "q5k.expected", rtol=2.4e-7)
+
+
+def test_bf16_dequant_matches_reference() raises:
+    var g = GGUFFile(FIX + "dequant-types.gguf")
+    _expect_rows_match(g, "bf16", "bf16.expected")
+
+
+def test_bf16_special_values() raises:
+    var src = Bytes(6)
+    var p = src.u8()
+    p.unsafe_store(0, 0x80)
+    p.unsafe_store(1, 0x3F)
+    p.unsafe_store(2, 0x00)
+    p.unsafe_store(3, 0xC0)
+    p.unsafe_store(4, 0x80)
+    p.unsafe_store(5, 0x7F)
+    var dst = Floats(3)
+    dequant_row(30, src.addr, dst.ptr(), 3)
+    assert_equal(dst[0], 1.0)
+    assert_equal(dst[1], -2.0)
+    assert_true(dst[2] > Float32(3.4e38))
+
+
+def test_q8_0_rejects_row_not_multiple_of_32() raises:
+    var src = Bytes(34)
+    var dst = Floats(33)
+    with assert_raises(contains="row length 33 is not a multiple of 32"):
+        dequant_row(8, src.addr, dst.ptr(), 33)
+
+
+def test_q5k_rejects_row_not_multiple_of_256() raises:
+    var src = Bytes(176)
+    var dst = Floats(300)
+    with assert_raises(contains="row length 300 is not a multiple of 256"):
+        dequant_row(13, src.addr, dst.ptr(), 300)
 
 
 def _fill(mut x: Floats, seed: Int):

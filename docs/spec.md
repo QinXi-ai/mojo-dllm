@@ -368,10 +368,17 @@ Initial quantization support:
 Unknown tensor types MUST fail explicitly:
 
 ```text
-unsupported GGUF tensor type: IQ3_XS
+unsupported GGUF tensor type: IQ3_XS (tensor blk.0.attn_q.weight)
 ```
 
 No silent fallback.
+
+A type with a reference decoder but without a matrix kernel currently fails
+at matrix load, for example:
+
+```text
+tensor blk.0.attn_q.weight is Q8_0: matrix kernels exist for Q4_K and Q6_K
+```
 
 ### 9.3 Loading strategy
 
@@ -1038,7 +1045,7 @@ Examples:
 
 ```text
 ERROR: unsupported model architecture: diffusion_gemma (supported: llada, dream)
-ERROR: unsupported GGUF tensor type: IQ2_XXS
+ERROR: unsupported GGUF tensor type: IQ2_XXS (tensor blk.0.attn_q.weight)
 ERROR: required metadata key missing: tokenizer.ggml.model
 ERROR: tensor shape mismatch for blk.0.attn_q.weight
 ERROR: model requires 8.1 GB but available memory is 5.9 GB
