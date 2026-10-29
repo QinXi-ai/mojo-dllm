@@ -93,7 +93,8 @@ class _hub_errors:
     def __exit__(self, exc_type, exc, tb) -> bool:
         if exc is None:
             return False
-        from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
+        import httpx2
+        from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
 
         if isinstance(exc, GatedRepoError):
             raise LauncherError(
@@ -105,7 +106,9 @@ class _hub_errors:
                 f"{self.repo} was not found on Hugging Face, or it is private. "
                 "Check the name, or set HF_TOKEN for a private repo."
             ) from exc
-        if isinstance(exc, (HfHubHTTPError, OSError)):
+        # httpx2 is the hub's HTTP client. Its transport errors (refused, timed out)
+        # are not OSError, and HfHubHTTPError is one of its HTTPError subclasses.
+        if isinstance(exc, (httpx2.HTTPError, OSError)):
             raise LauncherError(
                 f"could not reach Hugging Face for {self.repo}: {exc}\n"
                 "Check the network, or add --offline to use files already in the cache."
