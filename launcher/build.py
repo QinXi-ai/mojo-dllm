@@ -34,6 +34,14 @@ def last_lines(text: str, n: int) -> str:
     return "\n".join(text.splitlines()[-n:])
 
 
+def exec_binary(argv: list[str]) -> None:
+    """Replace this process with the binary; a missing or unrunnable one is a launcher error."""
+    try:
+        os.execv(argv[0], argv)
+    except OSError as e:
+        raise LauncherError(f"cannot start {argv[0]}: {e.strerror}. Run ./mojo-dllm doctor to check the build.") from e
+
+
 def source_mtimes() -> list[float]:
     return [p.stat().st_mtime for p in (ROOT / "src").rglob("*.mojo")]
 

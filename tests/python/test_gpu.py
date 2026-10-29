@@ -67,3 +67,10 @@ def test_auto_below_8_0_is_cpu_and_says_why() -> None:
 def test_an_explicit_device_is_passed_as_is(kind: str) -> None:
     d = choose_device(kind, [])
     assert d.kind == kind and d.line == f"device: {kind} (requested)"
+
+
+def test_a_failed_nvidia_smi_is_named_in_the_device_line() -> None:
+    assert choose_device("auto", [], "exit 9: driver mismatch").line == (
+        "device: cpu (nvidia-smi failed: exit 9: driver mismatch)"
+    )
+    assert choose_device("auto", []).line == "device: cpu (no NVIDIA GPU found)"

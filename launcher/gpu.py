@@ -49,11 +49,11 @@ def parse_nvidia_smi(text: str) -> list[Gpu]:
     return gpus
 
 
-def choose_device(requested: str, gpus: Sequence[Gpu]) -> Device:
+def choose_device(requested: str, gpus: Sequence[Gpu], smi_failure: str | None = None) -> Device:
     if requested != "auto":
         return Device(requested, "requested")
     if not gpus:
-        return Device("cpu", "no NVIDIA GPU found")
+        return Device("cpu", f"nvidia-smi failed: {smi_failure}" if smi_failure else "no NVIDIA GPU found")
     for gpu in gpus:
         if gpu.compute_cap >= MIN_COMPUTE_CAP:
             return Device(

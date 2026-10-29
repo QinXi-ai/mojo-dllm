@@ -9,9 +9,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from launcher.build import BINARY, ensure_built
-from launcher.errors import LauncherError
-from launcher.gpu import QUERY, choose_device, parse_nvidia_smi
+from launcher.build import BINARY, ensure_built, exec_binary
+from launcher.errors import UsageError
+from launcher.gpu import QUERY, Gpu, choose_device, parse_nvidia_smi
 from launcher.hub import Hub, offline_requested
 from launcher.models import DEFAULT_MODEL, ensure_model
 
@@ -37,17 +37,26 @@ def parse_run_args(argv: list[str]) -> RunArgs:
     prompt: str | None = None
     model, device, offline = DEFAULT_MODEL, "auto", False
     passthrough: list[str] = []
+    options_done = False
     i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg == "--offline":
+        if options_done:
+            if prompt is not None:
+                raise UsageError(f"unexpected argument {arg!r}: quote the prompt. Example: {EXAMPLE}")
+            prompt = arg
+        elif arg == "--":
+            options_done = True
+        elif arg == "--offline":
             offline = True
+        elif arg == "--prompt":
+            raise UsageError(f"pass the prompt as the first word, without --prompt. Example: {EXAMPLE}")
         elif arg.startswith("-"):
             if arg in BOOLEAN_FLAGS:
                 passthrough.append(arg)
             else:
                 if i + 1 >= len(argv):
-                    raise LauncherError(f"{arg} needs a value. Example: {EXAMPLE}")
+                    raise UsageError(f"{arg} needs a value. Example: {EXAMPLE}")
                 value = argv[i + 1]
                 i += 1
                 if arg in ("-m", "--model"):
@@ -59,12 +68,12 @@ def parse_run_args(argv: list[str]) -> RunArgs:
         elif prompt is None:
             prompt = arg
         else:
-            raise LauncherError(f"unexpected argument {arg!r}: quote the prompt. Example: {EXAMPLE}")
+            raise UsageError(f"unexpected argument {arg!r}: quote the prompt. Example: {EXAMPLE}")
         i += 1
     if device not in ("auto", "cpu", "gpu"):
-        raise LauncherError(f"--device must be auto, cpu or gpu, not {device!r}")
+        raise UsageError(f"--device must be auto, cpu or gpu, not {device!r}")
     if prompt is None:
-        raise LauncherError(f"run needs a prompt. Example: {EXAMPLE}")
+        raise UsageError(f"run needs a prompt. Example: {EXAMPLE}")
     return RunArgs(prompt, model, device, offline, passthrough)
 
 
@@ -75,14 +84,23 @@ def run_argv(binary: Path, model: Path, args: RunArgs, device: str) -> list[str]
     ]
 
 
-def detect_gpus() -> list:
+def detect_gpus() -> tuple[list[Gpu], str | None]:
+    """The GPUs nvidia-smi lists, and why it could not say (None when it ran)."""
     if shutil.which("nvidia-smi") is None:
-        return []
-    done = subprocess.run(
-        ["nvidia-smi", f"--query-gpu={QUERY}", "--format=csv,noheader,nounits"],
-        capture_output=True, text=True, timeout=60,
-    )
-    return parse_nvidia_smi(done.stdout) if done.returncode == 0 else []
+        return [], None
+    try:
+        done = subprocess.run(
+            ["nvidia-smi", f"--query-gpu={QUERY}", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired as e:
+        return [], f"timed out after {e.timeout:g} s"
+    except OSError as e:
+        return [], str(e)
+    if done.returncode != 0:
+        detail = done.stderr.strip().splitlines()
+        return [], f"exit {done.returncode}: {detail[0]}" if detail else f"exit {done.returncode}"
+    return parse_nvidia_smi(done.stdout), None
 
 
 def cmd_run(argv: list[str]) -> int:
@@ -91,10 +109,11 @@ def cmd_run(argv: list[str]) -> int:
     hub = Hub(offline=offline_requested(args.offline, os.environ))
     # Progress and status go to stderr so stdout stays the model's text.
     model = ensure_model(args.model, hub, sys.stderr, announce_cached=False)
-    device = choose_device(args.device, detect_gpus() if args.device == "auto" else [])
+    gpus, smi_failure = detect_gpus() if args.device == "auto" else ([], None)
+    device = choose_device(args.device, gpus, smi_failure)
     print(device.line, file=sys.stderr, flush=True)
     argv_out = run_argv(BINARY, model.resolve(), args, device.kind)
-    os.execv(argv_out[0], argv_out)
+    exec_binary(argv_out)
 
 
 def cmd_pull(argv: list[str]) -> int:
@@ -104,11 +123,11 @@ def cmd_pull(argv: list[str]) -> int:
         if arg == "--offline":
             offline = True
         elif arg.startswith("-"):
-            raise LauncherError(f"unknown option {arg} for pull. Usage: ./mojo-dllm pull [MODEL] [--offline]")
+            raise UsageError(f"unknown option {arg} for pull. Usage: ./mojo-dllm pull [MODEL] [--offline]")
         else:
             refs.append(arg)
     if len(refs) > 1:
-        raise LauncherError("pull takes one model. Usage: ./mojo-dllm pull [MODEL] [--offline]")
+        raise UsageError("pull takes one model. Usage: ./mojo-dllm pull [MODEL] [--offline]")
     hub = Hub(offline=offline_requested(offline, os.environ))
     ensure_model(refs[0] if refs else DEFAULT_MODEL, hub, sys.stdout, announce_cached=True)
     return 0

@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-import os
+import difflib
 import sys
 
-from launcher.build import BINARY, ensure_built
+from launcher.build import BINARY, ensure_built, exec_binary
 from launcher.doctor import run_doctor
-from launcher.errors import LauncherError
+from launcher.errors import LauncherError, UsageError
 from launcher.probes import real_probes
 from launcher.runcmd import cmd_pull, cmd_run
 from launcher.ui import Style
 from launcher.wizard import parse_setup_args, real_env, run_setup
 
 LAUNCHER_COMMANDS = ("setup", "pull", "run", "doctor", "help")
+# The binary's own commands. A test compares this list with command_spec() in src/main.mojo.
+BINARY_COMMANDS = ("inspect", "tokenize", "logits")
 
 
 def help_text(style: Style) -> str:
@@ -36,14 +38,14 @@ def help_text(style: Style) -> str:
         row("run", "generate text from a prompt; the binary's own flags pass through"),
         row("doctor", "check platform, toolchain, binary, GPU and model; changes nothing"),
         row("help", "show this text"),
-        "  Any other word (inspect, tokenize, logits) goes to the binary unchanged,",
-        "  after the build is current.",
+        "  inspect, tokenize and logits go to the binary unchanged, after the build is current.",
         "",
         b("Options"),
         "  setup [--model MODEL] [--yes] [--no-model]",
         "  pull [MODEL] [--offline]",
         '  run "PROMPT" [-m MODEL] [--device auto|cpu|gpu] [--offline] [binary flags]',
         "",
+        '  A prompt that starts with - goes after --: ./mojo-dllm run -- "-5 plus 3?"',
         "  MODEL is a path to a .gguf file, the alias llada-8b, or owner/repo[:QUANT].",
         "  Binary flags include --max-tokens, --steps, --block-length, --seed,",
         "  --temperature, --threads and --verbose.",
@@ -65,6 +67,12 @@ def help_text(style: Style) -> str:
     return "\n".join(lines)
 
 
+def _unknown_command(command: str) -> str:
+    close = difflib.get_close_matches(command, (*LAUNCHER_COMMANDS, *BINARY_COMMANDS), n=1)
+    hint = f"; did you mean {close[0]}?" if close else "."
+    return f"unknown command {command!r}{hint} Run ./mojo-dllm help for the commands."
+
+
 def main(argv: list[str]) -> int:
     command, rest = (argv[0], argv[1:]) if argv else ("help", [])
     if command in ("help", "-h", "--help") or (
@@ -81,8 +89,10 @@ def main(argv: list[str]) -> int:
             return cmd_run(rest)
         if command == "doctor":
             return run_doctor(real_probes(), sys.stdout, Style.for_stream(sys.stdout))
+        if command not in BINARY_COMMANDS:
+            raise UsageError(_unknown_command(command))
         ensure_built()
-        os.execv(str(BINARY), [str(BINARY), *argv])
+        exec_binary([str(BINARY), *argv])
     except LauncherError as e:
         print(f"error: {e}", file=sys.stderr)
         return e.code

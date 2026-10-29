@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import os
+import re
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,7 @@ from launcher import cli
 from launcher.ui import Style
 
 COMMANDS = ["setup", "pull", "run", "doctor", "help"]
+ROOT = Path(__file__).resolve().parents[2]
 ENV_VARS = ["HF_TOKEN", "HF_HOME", "HF_HUB_CACHE", "MOJO_DLLM_GPU_ARCH"]
 
 
@@ -50,7 +53,7 @@ def test_launcher_commands_answer_help_flags(capsys: pytest.CaptureFixture[str])
 
 
 def test_run_without_a_prompt_is_an_error(capsys: pytest.CaptureFixture[str]) -> None:
-    assert cli.main(["run"]) == 1
+    assert cli.main(["run"]) == 2
     err = capsys.readouterr().err
     assert err.startswith("error:") and './mojo-dllm run "' in err
 
@@ -66,11 +69,71 @@ def test_setup_usage_error_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
     assert capsys.readouterr().err.startswith("error:")
 
 
-def test_other_words_go_to_the_binary_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[tuple[str, list[str]]] = []
-    monkeypatch.setattr(cli, "ensure_built", lambda *a, **k: seen.append(("built", [])))
-    monkeypatch.setattr(cli.os, "execv", lambda path, argv: seen.append((path, argv)))
-    cli.main(["inspect", "m.gguf", "--x"])
-    assert seen[0][0] == "built"
-    path, argv = seen[1]
-    assert path == str(cli.BINARY) and argv == [str(cli.BINARY), "inspect", "m.gguf", "--x"]
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run"],
+        ["run", "hi", "--steps"],
+        ["run", "hi", "-m"],
+        ["run", "Explain", "diffusion"],
+        ["run", "hi", "--device", "tpu"],
+        ["run", "--prompt", "hi"],
+        ["pull", "--bogus"],
+        ["pull", "a/b", "c/d"],
+    ],
+)
+def test_command_line_mistakes_exit_2(argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(argv) == 2
+    assert capsys.readouterr().err.startswith("error:")
+
+
+def test_a_mistyped_command_builds_nothing_and_names_the_closest(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a mistyped command must not build or exec")
+
+    monkeypatch.setattr(cli, "ensure_built", forbidden)
+    monkeypatch.setattr(os, "execv", forbidden)
+    assert cli.main(["doctr"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error:") and "did you mean doctor?" in err and "./mojo-dllm help" in err
+
+
+def test_a_word_close_to_nothing_still_points_at_help(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "ensure_built", lambda: pytest.fail("built"))
+    assert cli.main(["zzzzzzzz"]) == 2
+    err = capsys.readouterr().err
+    assert "did you mean" not in err and "./mojo-dllm help" in err
+
+
+@pytest.mark.parametrize("command", ["inspect", "tokenize", "logits"])
+def test_each_binary_command_is_forwarded(command: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cli, "ensure_built", lambda: False)
+    monkeypatch.setattr(os, "execv", lambda path, argv: seen.append(argv))
+    cli.main([command, "--x"])
+    assert seen == [[str(cli.BINARY), command, "--x"]]
+
+
+def test_binary_commands_match_src_main_mojo() -> None:
+    src = (ROOT / "src/main.mojo").read_text()
+    start = src.find("def command_spec(")
+    assert start != -1, "src/main.mojo has no command_spec(); update this test"
+    body = src[start:].split("\ndef ", 1)[0]
+    in_binary = set(re.findall(r'command\s*==\s*"([a-z][a-z-]*)"', body))
+    assert in_binary, "found no command names in command_spec(); update this test"
+    assert set(cli.BINARY_COMMANDS) == in_binary - {"run"}
+    assert set(cli.LAUNCHER_COMMANDS) >= {"run"}
+
+
+def test_a_missing_binary_after_the_build_names_doctor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "ensure_built", lambda: False)
+    monkeypatch.setattr(cli, "BINARY", tmp_path / "absent")
+    assert cli.main(["inspect", "m.gguf"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error:") and "./mojo-dllm doctor" in err and "absent" in err
