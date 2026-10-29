@@ -8,6 +8,8 @@ mojo-dllm logits   --model PATH --tokens IDS --rows POSITIONS --out FILE [--thre
 ```
 
 `mojo-dllm COMMAND --help` (or `-h`) prints that command's usage and exits 0.
+Help wins over every other problem in the arguments, wherever it appears, except
+as the value of a flag (`--prompt --help` sets the prompt to `--help`).
 `mojo-dllm`, `mojo-dllm help` and `mojo-dllm --help` print the usage of every
 command. Each command declares its flags: a flag the command does not declare
 stops the run (see [Errors](#errors)).
@@ -67,8 +69,12 @@ change nothing; every other error exits with status 1.
 | `ERROR: unknown flag --stpes for 'run' (did you mean --steps?)` | The command does not declare the flag. The parenthesis appears when a declared flag is at most 2 edits away. The next line is `see: mojo-dllm run --help` |
 | `ERROR: missing required flag --model for 'run'` | A required flag is absent. The usage of the command follows |
 | `ERROR: missing model path for 'inspect'` | `inspect` takes the path as an argument. The usage follows |
-| `ERROR: unexpected argument 'x' for 'run'` | `run`, `tokenize` and `logits` take flags only |
+| `ERROR: unknown command: bogus` | The first argument is not a command. The next line is `see: mojo-dllm --help` |
+| `ERROR: unexpected argument 'x' for 'run'` | `run`, `tokenize` and `logits` take flags only, and `inspect` takes one path |
+| `ERROR: unknown flag --model=x for 'run'` | Flags take their value as the next argument. The next line says `flags take their value as the next argument: --model x` |
 | `ERROR: flag --prompt needs a value` | A value flag is the last argument |
+| `ERROR: flag --steps needs an integer, got 'abc'` | A numeric flag holds text, or a number too large for 64 bits. `--temperature` needs a finite number and `--tokens` and `--rows` need comma-separated integers |
+| `ERROR: flag --steps must be at least 1, got 0` | `--max-tokens`, `--steps`, `--block-length` and `--threads` need at least 1, and `--temperature` at least 0. The check runs before the model is mapped |
 | `ERROR: cannot open model file PATH: No such file or directory` | The path is wrong. The reason is the operating system's. The next line is `to download a model, run: ./mojo-dllm pull` |
 | `ERROR: cannot open model file PATH: Permission denied` | The open failed for a reason other than a missing file, such as `Not a directory`. The operating system names the reason. No download hint follows, because `pull` would not fix it |
 | `ERROR: is a directory: PATH` | The model path names a directory |

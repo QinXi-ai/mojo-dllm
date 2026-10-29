@@ -9,22 +9,26 @@ struct Args(Movable):
     var flags: List[String]
     var positional: List[String]
     var unknown: List[String]
+    var missing_value: String
 
     def __init__(
         out self,
         argv: List[String],
         value_flags: List[String],
         boolean_flags: List[String],
-    ) raises:
+    ):
         """Parses `argv[2:]` against the flags the command declares.
 
         A flag the command does not declare goes to `unknown` and takes no
         value. `--help` and `-h` set the boolean flag `help` for every command.
+        A value flag in last position stops the parse and is named in
+        `missing_value`; the caller decides whether help outranks that.
         """
         self.values = Dict[String, String]()
         self.flags = List[String]()
         self.positional = List[String]()
         self.unknown = List[String]()
+        self.missing_value = String("")
         self.command = argv[1] if len(argv) > 1 else String("")
         var i = 2
         while i < len(argv):
@@ -51,7 +55,8 @@ struct Args(Movable):
                     i += 1
                     continue
                 if i + 1 >= len(argv):
-                    raise Error("flag --" + name + " needs a value")
+                    self.missing_value = name
+                    break
                 self.values[name] = argv[i + 1]
                 i += 2
             else:
