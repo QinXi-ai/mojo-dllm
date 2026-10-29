@@ -328,11 +328,11 @@ def malformed() -> None:
     def part_offset(field, index: int) -> int:
         return int(field.offset + sum(p.nbytes for p in field.parts[:index]))
 
-    def patch(name: str, offset: int, width: int, value: int) -> None:
+    def patch(name: str, offset: int, width: int, value: int, old: int) -> None:
         data = bytearray(base)
         assert 0 <= offset <= len(data) - width
+        assert int.from_bytes(data[offset:offset + width], "little") == old
         data[offset:offset + width] = value.to_bytes(width, "little")
-        assert int.from_bytes(data[offset:offset + width], "little") == value
         assert data[:offset] == base[:offset]
         assert data[offset + width:] == base[offset + width:]
         (out / (name + ".gguf")).write_bytes(data)
@@ -341,29 +341,32 @@ def malformed() -> None:
                       ("header-20", 20), ("metadata-cut", 60)):
         (out / (name + ".gguf")).write_bytes(base[:cut])
     for version in (1, 4):
-        patch(f"version-{version}", 4, 4, version)
+        patch(f"version-{version}", 4, 4, version, 3)
     for name, offset in (("tensors", 8), ("kv", 16)):
         for label, value in (("large", 1 << 21), ("negative", (1 << 64) - 1)):
-            patch(f"{name}-{label}", offset, 8, value)
+            patch(f"{name}-{label}", offset, 8, value, 2)
     scalar = reader.fields["general.architecture"]
     array = reader.fields["test.array"]
     assert int(scalar.parts[2][0]) == 8  # GGUF string
     assert int(array.parts[2][0]) == 9  # GGUF array
     assert int(array.parts[3][0]) == 5  # int32 elements
-    patch("key-length", int(scalar.offset), 8, 1 << 20)
-    patch("scalar-type", part_offset(scalar, 2), 4, 99)
-    patch("array-type", part_offset(array, 3), 4, 99)
-    patch("nested-array", part_offset(array, 3), 4, 9)
+    patch("key-length", int(scalar.offset), 8, 1 << 20, len("general.architecture"))
+    patch("key-length-negative", int(scalar.offset), 8, 1 << 63, len("general.architecture"))
+    patch("scalar-type", part_offset(scalar, 2), 4, 99, 8)
+    patch("array-type", part_offset(array, 3), 4, 99, 5)
+    patch("nested-array", part_offset(array, 3), 4, 9, 5)
     tensor = reader.tensors[0]
     assert tensor.name == "f32"
     assert int(tensor.field.parts[2][0]) == 1
     for dims in (0, 5):
-        patch(f"dims-{dims}", part_offset(tensor.field, 2), 4, dims)
+        patch(f"dims-{dims}", part_offset(tensor.field, 2), 4, dims, 1)
     last = reader.tensors[-1]
     assert last.name == "q4k"
     cut = int(last.data_offset + last.n_bytes - 1)
     assert cut > reader.data_offset and cut < len(base)
     (out / "tensor-cut.gguf").write_bytes(base[:cut])
+    # Valid empty directory: the last uint64 read ends exactly at EOF, no padding.
+    (out / "exact-eof.gguf").write_bytes(b"GGUF" + (3).to_bytes(4, "little") + bytes(16))
 
 
 def main() -> None:
