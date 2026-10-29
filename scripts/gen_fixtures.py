@@ -391,6 +391,54 @@ def dequant_types() -> None:
     w.close()
 
 
+def metadata_cases() -> None:
+    """Metadata-only ModelConfig inputs; no model weights or random draws."""
+    out = OUT / "metadata"
+    out.mkdir(parents=True, exist_ok=True)
+    required = {
+        "llada.block_count": 2,
+        "llada.embedding_length": 512,
+        "llada.attention.head_count": 4,
+        "llada.feed_forward_length": 1024,
+        "llada.attention.layer_norm_rms_epsilon": 1e-5,
+        "tokenizer.ggml.mask_token_id": 511,
+    }
+
+    def write(name: str, updates=None, omit=None) -> None:
+        fields = {**required, "llada.vocab_size": 512, **(updates or {})}
+        if omit:
+            del fields[omit]
+        w = GGUFWriter(str(out / (name + ".gguf")), "llada")
+        for key, value in fields.items():
+            if isinstance(value, str):
+                w.add_string(key, value)
+            elif isinstance(value, float):
+                w.add_float32(key, value)
+            else:
+                w.add_uint32(key, value)
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+
+    for key in required:
+        write("missing-" + key, omit=key)
+    write("kv-heads", {"llada.attention.head_count_kv": 3})
+    write("hidden-size", {"llada.embedding_length": 513})
+    write("rope-width", {"llada.rope.dimension_count": 64})
+    write("key-length", {"llada.attention.key_length": 64})
+    write("rope-type", {"llada.rope.scaling.type": "yarn"})
+    write("rope-factor", {"llada.rope.scaling.factor": 4.0})
+    write("rope-width-type", {"llada.rope.dimension_count": "128"})
+    write("rope-factor-type", {"llada.rope.scaling.factor": "1.0"})
+    write("defaults")
+    for kind in ("none", "linear"):
+        write("compatible-" + kind, {"llada.rope.dimension_count": 128,
+                                    "llada.attention.key_length": 128,
+                                    "llada.rope.scaling.type": kind,
+                                    "llada.rope.scaling.factor": 1.0})
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     kquants()
@@ -399,6 +447,7 @@ def main() -> None:
     malformed()
     dequant_types()
     unsupported_embedding()
+    metadata_cases()
     for p in sorted(OUT.iterdir()):
         print(f"{p.stat().st_size:>9}  {p.relative_to(ROOT)}")
 

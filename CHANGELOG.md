@@ -8,6 +8,8 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
+- `scripts/check_weights.py` compares GGUF tensor shapes with safetensors
+  headers, with LLaDA/Dream name mapping and a standalone self-test.
 - Q8_0 and Q5_K reference decoders, with GGUF type sizing and reference tests
   for Q8_0, Q5_K and BF16. Matrix kernel support remains Q4_K and Q6_K.
 - Fused elementwise kernels on the GPU: the residual add, the RMSNorm and the
@@ -55,6 +57,8 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Changed
 
+- Model configuration rejects incompatible RoPE widths/scaling and attention
+  key lengths, and unsupported-architecture errors list LLaDA and Dream.
 - Matrix load errors name the tensor and distinguish an unsupported type from
   a decodable type without matrix kernels; unsupported embeddings fail at load.
 - The Q6_K GPU GEMM copies each 224-byte block to shared memory as it is,

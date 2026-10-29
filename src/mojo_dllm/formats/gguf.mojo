@@ -393,7 +393,10 @@ struct GGUFFile(Movable):
 
     def get_int(self, key: String) raises -> Int:
         var kv = self._kv(key)
-        return self._read_scalar_int(kv.kind, kv.at)
+        try:
+            return self._read_scalar_int(kv.kind, kv.at)
+        except e:
+            raise Error("metadata key " + key + ": " + String(e))
 
     def get_int_or(self, key: String, default: Int) raises -> Int:
         if not self.has_key(key):
@@ -407,7 +410,10 @@ struct GGUFFile(Movable):
             return bitcast[DType.float32](UInt32(r.u32()))
         if kv.kind == GGUF_TYPE_FLOAT64:
             return Float32(bitcast[DType.float64](r.u64()))
-        return Float32(self._read_scalar_int(kv.kind, kv.at))
+        try:
+            return Float32(self._read_scalar_int(kv.kind, kv.at))
+        except e:
+            raise Error("metadata key " + key + ": " + String(e))
 
     def get_f32_or(self, key: String, default: Float32) raises -> Float32:
         if not self.has_key(key):
