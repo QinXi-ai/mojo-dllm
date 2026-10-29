@@ -1,9 +1,8 @@
 ---
 version: 2
 updates:
-  # Workflow actions are the only dependency Dependabot can see here: Mojo and
-  # max-core are pinned in pixi.toml on purpose and moved by hand, because a
-  # Mojo release can change the language (1.1 removed `fn`).
+  # Mojo and max-core are pinned in pyproject.toml on purpose and moved by hand,
+  # because a Mojo release can change the language (1.1 removed `fn`).
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -22,3 +21,17 @@ updates:
         update-types:
           - "minor"
           - "patch"
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+    ignore:
+      - dependency-name: "mojo*"
+      - dependency-name: "max*"
+    cooldown:
+      default-days: 5
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3

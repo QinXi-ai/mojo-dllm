@@ -3,9 +3,13 @@
 ## Setup
 
 ```bash
-pixi install
+uv sync --frozen                      # the pinned Mojo toolchain, in .venv
 scripts/ci-local.sh --install-hooks
 ```
+
+`scripts/ci-local.sh` also needs shellcheck, markdownlint-cli2 (`npm install
+--global markdownlint-cli2`), mdBook and an authenticated `gh`. A missing tool
+fails its step; it never skips it.
 
 The hooks run `scripts/ci-local.sh --fast` before each commit (hygiene scan,
 `mojo format`, `-Werror` build) and the full set before each push.
@@ -17,14 +21,15 @@ The hooks run `scripts/ci-local.sh --fast` before each commit (hygiene scan,
 | Step | Command | Fails when |
 |---|---|---|
 | hygiene | `scripts/check_hygiene.sh` | a credential pattern or the author's employer name appears in tracked text |
-| format | `pixi run fmt-check` | `mojo format` changes any file (Mojo has no check mode) |
-| build | `pixi run build` | any compiler warning (`-Werror`) |
-| tests | `pixi run test` | a test fails, a file runs zero tests, or the total differs from `tests/test-count.txt` |
+| format | `uv run --frozen mojo format -q src tests bench`, then `git diff` | `mojo format` changes any file (Mojo has no check mode) |
+| build | `scripts/build.sh` | any compiler warning (`-Werror`) |
+| tests | `scripts/run-tests.sh` | a test fails, a file runs zero tests, or the total differs from `tests/test-count.txt` |
 | shellcheck, yamllint, markdownlint | | lint |
-| claims | `scripts/bench_table.py --check` | a benchmark table differs from what `bench/results/*.json` renders |
+| claims | `uv run --no-project python scripts/bench_table.py --check` | a benchmark table differs from what `bench/results/*.json` renders |
 | docs | `mdbook build` + `scripts/check_links.py` | a relative link is broken |
 | action pins | `scripts/verify-action-pins.sh` (CI) | a pinned SHA is not the tag its comment names |
-| eval self-test | `bench/eval_gsm8k.py --self-test` | answer extraction or the paired statistics break, or `gsm8k-200.jsonl` is not 200 rows with numeric answers |
+| eval self-test | `uv run --no-project python bench/eval_gsm8k.py --self-test` | answer extraction or the paired statistics break, or `gsm8k-200.jsonl` is not 200 rows with numeric answers |
+| checker self-test | `uv run --only-group fixtures python scripts/check_weights.py --self-test` | a safetensors or index guard in `check_weights.py` stops rejecting its case, or stops naming it |
 | no GPU | `scripts/check_no_gpu.sh` | `--device gpu` without a GPU does anything but exit 1 with a message |
 | GPU tests | `scripts/run-gpu-tests.sh` (local only) | a GPU kernel or the GPU forward pass disagrees with the CPU or the f32 reference, or the count differs from `tests/gpu/test-count.txt` |
 
@@ -48,7 +53,7 @@ live in `tests/fixtures/` and come from scripts, never from hand:
 | `dequant-types.gguf`, `unsupported-embedding.gguf` | `scripts/gen_fixtures.py` | Q8_0/Q5_K/BF16 references (seed 340034) and embedding rejection before CPU/GPU allocation (no RNG) |
 | `llada-tokenizer.gguf`, `tokenizer-golden.tsv` | `scripts/gen_tokenizer_fixture.py` | tokenizer ids against `llama-tokenize` |
 | `src/mojo_dllm/tokenizer/unicode_tables.mojo` | `scripts/gen_unicode_tables.py` | code point classes from llama.cpp's own tables |
-| GGUF/source tensor shape report | `scripts/check_weights.py` (`--self-test`) | LLaDA and Dream name mapping and safetensors header shapes; run with `uv run --with gguf==0.19.0 --with numpy==2.3.3` |
+| GGUF/source tensor shape report | `scripts/check_weights.py` (`--self-test`) | LLaDA and Dream name mapping and safetensors header shapes; run with `uv run --only-group fixtures python scripts/check_weights.py` |
 
 `tests/gpu/test_gpu.mojo` holds the GPU tests: each kernel against the CPU
 function it replaces, and the GPU forward pass on both tiny models against the
@@ -62,8 +67,8 @@ the reference formats, not against itself.
 ## Benchmarks
 
 ```bash
-python3 bench/run_bench.py --config bench/config.json --reps 3
-python3 scripts/bench_table.py --write
+uv run --no-project python bench/run_bench.py --config bench/config.json --reps 3
+uv run --no-project python scripts/bench_table.py --write
 ```
 
 `bench/config.json` names the model files and the llama.cpp and diffuse-cpp
@@ -113,10 +118,10 @@ more per step, a K/V cache) needs a comparison against the one-token-per-step
 baseline before it becomes a default.
 
 ```bash
-python3 bench/eval_gsm8k.py run --model M.gguf --arm baseline
-python3 bench/eval_gsm8k.py run --model M.gguf --arm candidate -- --some-flag
-python3 bench/eval_gsm8k.py compare baseline candidate
-python3 bench/eval_gsm8k.py compare baseline candidate --limit 50
+uv run --no-project python bench/eval_gsm8k.py run --model M.gguf --arm baseline
+uv run --no-project python bench/eval_gsm8k.py run --model M.gguf --arm candidate -- --some-flag
+uv run --no-project python bench/eval_gsm8k.py compare baseline candidate
+uv run --no-project python bench/eval_gsm8k.py compare baseline candidate --limit 50
 ```
 
 `compare` writes `bench/eval/<date>-<a>-vs-<b>.json`, and
@@ -128,7 +133,14 @@ Run that round with nothing else on the machine.
 
 ## Toolchain
 
-Mojo is pinned to 1.1.0 and max-core to 26.6.0 in `pixi.toml`, locked in
-`pixi.lock`. Bump them in a commit of their own with a green run: Mojo 1.1
+Mojo is pinned to 1.1.0 and max-core to 26.6.0 in `pyproject.toml`, locked in
+`uv.lock`; both come from PyPI. Bump them together by editing the two pins,
+running `uv lock`, and committing that on its own with a green run: Mojo 1.1
 removed `fn`, `alias` and `@parameter` closures, and each release has moved
-APIs this code uses. `max-core` is needed for `max.algorithm.parallelize`.
+APIs this code uses. `max-core` supplies `max.algorithm.parallelize` and the
+GPU API (`max.gpu`, `max.gpu.host`). The Mojo wheels need glibc 2.34 or newer.
+
+The Python scripts run through uv too. `uv run --no-project python script.py`
+runs a script that uses only the standard library. The fixture generators and
+`bench/parity.py` need numpy and gguf, pinned in the `fixtures` group:
+`uv run --only-group fixtures python scripts/gen_fixtures.py`.

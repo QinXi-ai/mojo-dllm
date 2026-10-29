@@ -26,13 +26,13 @@
 # Preserve SHA pins; verify the tag named by each comment, peeling tag objects.
 # `# stable (branch)` is a deliberate moving reference, reported without a
 # comparison to today's branch head. Use exact release tags for other comments.
-# Requires authenticated gh, Python 3 and PyYAML (provided by yamllint).
+# Requires authenticated gh and uv (PyYAML comes from the lint group in pyproject.toml).
 set -uo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="${1:-$script_dir/..}"
 rows="$(mktemp)" || exit 1
 trap 'rm -f "$rows"' EXIT
-python3 "$script_dir/action-pin-comments.py" "$root" > "$rows" || exit 1
+uv run --frozen --only-group lint python "$script_dir/action-pin-comments.py" "$root" > "$rows" || exit 1
 fail=0
 count=0
 declare -A resolved

@@ -28,7 +28,7 @@ body:
     id: env
     attributes:
       label: Environment
-      description: Output of `pixi run mojo --version` and `lscpu | head -20`.
+      description: Output of `./mojo-dllm doctor` and `lscpu | head -20`.
       render: text
     validations:
       required: true

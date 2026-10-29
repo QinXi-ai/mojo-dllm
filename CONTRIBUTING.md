@@ -7,8 +7,7 @@ supported, or a number better verified are the ones that land.
 ## Set up
 
 ```bash
-pixi install                          # pinned Mojo 1.1.0
-pixi run build                        # build/mojo-dllm
+./mojo-dllm setup                     # pinned Mojo 1.1.0, build/mojo-dllm, a model
 scripts/ci-local.sh --install-hooks   # gates on commit and push
 ```
 
@@ -30,8 +29,8 @@ explains each one.
   performance should come with a new result file from `bench/run_bench.py`.
 - **Errors name the thing.** User-facing failures say which key, tensor or
   type is wrong; no assertion-only paths.
-- **Toolchain bumps stand alone.** Moving Mojo or max-core in `pixi.toml` is
-  its own commit with a green run.
+- **Toolchain bumps stand alone.** Moving Mojo or max-core in `pyproject.toml`
+  (and `uv.lock`) is its own commit with a green run.
 
 ## Commit messages
 
@@ -40,5 +39,5 @@ An imperative subject under 72 characters, and a body that says why.
 ## Reporting bugs
 
 Open an issue with the command you ran, the model file (name and sha256), the
-output, and `mojo --version` and `lscpu | head -20`. For security issues, see
+output, and `./mojo-dllm doctor` and `lscpu | head -20`. For security issues, see
 [SECURITY.md](SECURITY.md).

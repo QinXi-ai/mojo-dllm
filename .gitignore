@@ -1,8 +1,10 @@
 build/
-.pixi/
+.venv/
 scratch/
 site/
 book/
 *.f32.tmp
 __pycache__/
+/models/
+/*.gguf
 bench/eval/runs/PAUSE

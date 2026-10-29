@@ -33,18 +33,13 @@ case "${1:-}" in
         ;;
 esac
 
-# pixi's installer puts it in ~/.pixi/bin, which may not be on PATH in a
-# git hook or a shell whose rc file the installer was told not to edit.
-if ! command -v pixi >/dev/null 2>&1 && [ -x "$HOME/.pixi/bin/pixi" ]; then
-    PATH="$HOME/.pixi/bin:$PATH"
+# uv's installer puts it in ~/.local/bin, which may not be on PATH in a git hook
+# or a shell whose rc file the installer was told not to edit.
+if ! command -v uv >/dev/null 2>&1 && [ -x "$HOME/.local/bin/uv" ]; then
+    PATH="$HOME/.local/bin:$PATH"
 fi
-if command -v mojo >/dev/null 2>&1; then
-    MOJO=mojo
-elif command -v pixi >/dev/null 2>&1; then
-    MOJO="pixi run mojo"
-else
-    MOJO=""
-fi
+# The compiler is the one uv.lock pins; MOJO replaces it (see scripts/build.sh).
+MOJO="${MOJO:-uv run --frozen mojo}"
 export MOJO
 
 RESULTS=()
@@ -63,6 +58,7 @@ step() {
 need() {
     command -v "$1" >/dev/null 2>&1 || {
         echo "missing tool: $1" >&2
+        [ "$1" = uv ] && echo "install it with: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
         return 1
     }
 }
@@ -77,7 +73,7 @@ hygiene() {
 fmt_check() {
     # Compare the tree before and after formatting, so uncommitted edits that
     # are already formatted pass and only formatter changes fail.
-    [ -n "$MOJO" ] || { echo "missing tool: mojo (install pixi, then run pixi install)" >&2; return 1; }
+    need "${MOJO%% *}" || return 1
     local before after
     before="$(git diff -- src tests bench | sha256sum)"
     $MOJO format -q src tests bench || return 1
@@ -89,20 +85,25 @@ fmt_check() {
     fi
 }
 build() {
-    [ -n "$MOJO" ] || { echo "missing tool: mojo" >&2; return 1; }
+    need "${MOJO%% *}" || return 1
     bash scripts/build.sh
 }
 shell_lint() {
     need shellcheck && shellcheck --severity=warning scripts/*.sh .githooks/*
 }
 yaml_lint() {
-    need yamllint && yamllint --strict .github
+    need uv && uv run --frozen --only-group lint yamllint --strict .github
 }
 md_lint() {
     need markdownlint-cli2 && markdownlint-cli2 "*.md" "docs/**/*.md" "#docs/spec.md" "#node_modules"
 }
+launcher_tests() {
+    need uv && uv run --frozen --only-group test pytest tests/python -q
+}
 claims() {
-    python3 scripts/bench_table.py --check && python3 bench/eval_gsm8k.py --self-test
+    need uv && uv run --no-project python scripts/bench_table.py --check &&
+        uv run --no-project python bench/eval_gsm8k.py --self-test &&
+        timeout 300 uv run --frozen --only-group fixtures python scripts/check_weights.py --self-test
 }
 action_pins() {
     # Resolves each pinned SHA's tag through the GitHub API, so it needs gh.
@@ -127,6 +128,7 @@ if [ "$mode" = full ]; then
     step "shellcheck" shell_lint
     step "yamllint" yaml_lint
     step "markdownlint" md_lint
+    step "launcher tests" launcher_tests
     step "README numbers match bench/results" claims
     step "docs build + links" docs_build
     step "action pins match their tags" action_pins

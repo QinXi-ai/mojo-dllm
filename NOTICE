@@ -8,9 +8,9 @@ Third-party material and dependencies
 
 Mojo toolchain (Modular Inc.)
   mojo-dllm is written in Mojo and built with the `mojo` and `max-core`
-  packages pinned in pixi.toml. The Mojo compiler and standard library source
+  packages pinned in pyproject.toml. The Mojo compiler and standard library source
   code is available under the Apache License v2.0 with LLVM Exceptions. The
-  prebuilt conda/PyPI packages, including the runtime shared libraries a
+  prebuilt PyPI packages, including the runtime shared libraries a
   `mojo build` binary links against, are distributed under Modular's own
   license terms (LicenseRef-MAX-Platform-Software-License; see
   https://www.modular.com/legal). Anyone redistributing compiled mojo-dllm

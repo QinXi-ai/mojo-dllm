@@ -76,7 +76,7 @@ before advertising a new matrix type as supported end to end.
 Before loading a large conversion, compare its tensor shapes with the source:
 
 ```bash
-uv run --with gguf==0.19.0 --with numpy==2.3.3 scripts/check_weights.py \
+uv run --only-group fixtures python scripts/check_weights.py \
   model-Q4_K_M.gguf <hf-dir>/model.safetensors.index.json
 # For an unsharded source, pass model.safetensors instead of the index.
 ```

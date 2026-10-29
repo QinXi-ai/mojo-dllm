@@ -1,0 +1,31 @@
+[project]
+name = "mojo-dllm"
+version = "0.1.0"
+description = "Portable local inference for diffusion language models, written in Mojo."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = [
+    # The pinned toolchain. A Mojo release can change the language (1.1 removed
+    # `fn`), so both move by hand, together.
+    "mojo==1.1.0",
+    "max-core==26.6.0",
+]
+
+[dependency-groups]
+# scripts/gen_fixtures.py, scripts/gen_tokenizer_fixture.py and bench/parity.py.
+fixtures = ["numpy==2.3.3", "gguf==0.19.0"]
+# The lint tools CI runs, at the versions it runs them.
+lint = ["yamllint==1.38.0", "PyYAML==6.0.2"]
+# tests/python, the ./mojo-dllm launcher tests.
+test = ["pytest==9.1.1", "huggingface-hub==2.2.0"]
+
+[tool.uv]
+# `uv sync` installs the toolchain only; a group is opted into with --group.
+default-groups = []
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+# The launcher package sits at the repo root and is not installed.
+pythonpath = ["."]

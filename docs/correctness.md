@@ -175,7 +175,7 @@ Evidence: `bench/parity/2026-10-09-dream-gpu.json` (mojo-dllm `cedc0b5`).
 ```bash
 c++ -O2 -std=c++17 tools/ref/llada_ref.cpp -I$LLAMA/include -I$LLAMA/ggml/include \
     -L$LLAMA/build/bin -lllama -lggml -lggml-base -Wl,-rpath,$LLAMA/build/bin -o build/llada_ref
-python3 bench/parity.py --arch llada --model models/LLaDA-8B-Instruct.Q4_K_M.gguf
-python3 bench/parity.py --arch dream --model models/Dream-v0-Instruct-7B-Q4_K_M.gguf
-python3 scripts/bench_table.py --write
+uv run --only-group fixtures python bench/parity.py --arch llada --model models/LLaDA-8B-Instruct.Q4_K_M.gguf
+uv run --only-group fixtures python bench/parity.py --arch dream --model models/Dream-v0-Instruct-7B-Q4_K_M.gguf
+uv run --no-project python scripts/bench_table.py --write
 ```

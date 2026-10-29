@@ -119,26 +119,28 @@ the ablation row measures.
 ## Quick start
 
 ```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh    # skip if you have uv
 git clone https://github.com/vladimirrott/mojo-dllm && cd mojo-dllm
-pixi install && pixi run build
-
-curl -L -o LLaDA-8B-Instruct.Q4_K_M.gguf \
-  https://huggingface.co/mradermacher/LLaDA-8B-Instruct-GGUF/resolve/main/LLaDA-8B-Instruct.Q4_K_M.gguf
-
-build/mojo-dllm run --model LLaDA-8B-Instruct.Q4_K_M.gguf \
-  --prompt "Explain speculative decoding in two sentences." \
-  --max-tokens 64 --steps 32 --verbose
+./mojo-dllm setup
+./mojo-dllm run "Explain speculative decoding in two sentences."
 ```
 
-You need Linux on x86-64 with AVX2 and about 6 GB of free memory. Pixi
-installs the pinned Mojo toolchain into the project directory.
+`setup` checks the machine, installs the pinned Mojo toolchain into `.venv`,
+builds `build/mojo-dllm`, offers to download LLaDA-8B (4.9 GB, sha256
+checked) and runs a short smoke test. A second `setup` skips the build and
+the download when they are current. `./mojo-dllm doctor` reports what is
+missing and the command that fixes it.
 
-On an NVIDIA GPU with compute capability 8.0 or newer, add `--device gpu`.
-It has been measured on an RTX 3050 Laptop GPU; other cards in that range
-should work but are untested. The weights then live in GPU memory; if the card
-has too little free, mojo-dllm says how much it needs and exits. The
-[quick start guide](docs/quickstart.md) covers `inspect`, `tokenize` and the
-flags.
+You need Linux on x86-64 with AVX2, glibc 2.34 or newer, and about 6 GB of
+free memory. `run` picks an NVIDIA GPU with compute capability 8.0 or newer
+when it finds one, and the CPU otherwise; `--device cpu` or `--device gpu`
+overrides the choice. The GPU path has been measured on an RTX 3050 Laptop
+GPU only. If the card has too little free memory, mojo-dllm says how much it
+needs and exits.
+
+`-m` takes another model: a path to a `.gguf` file, or a Hugging Face repo as
+`owner/repo[:QUANT]`. The [quick start guide](docs/quickstart.md) covers
+models, offline use, `inspect`, `tokenize` and the flags.
 
 ## How it works
 
@@ -207,7 +209,7 @@ The [plan](docs/plan.md) lists what the original
 Start with [CONTRIBUTING.md](CONTRIBUTING.md). The short version:
 
 ```bash
-pixi install
+uv sync --frozen
 scripts/ci-local.sh --install-hooks   # pre-commit: fast gates, pre-push: all of them
 scripts/ci-local.sh                   # what CI runs
 ```
@@ -218,5 +220,5 @@ Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 mojo-dllm builds with Modular's Mojo toolchain. The compiler and standard
 library sources are Apache-2.0 with LLVM exceptions; the prebuilt packages and
-runtime libraries that `pixi install` fetches ship under Modular's own terms,
+runtime libraries that `uv sync` fetches ship under Modular's own terms,
 summarized in NOTICE. LLaDA is by GSAI-ML and released under MIT.

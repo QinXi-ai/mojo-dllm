@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Extract pinned workflow references and their comments, preserving occurrences.
 
-Requires PyYAML (also installed by yamllint). This does not replace the release
-rehearsal's SHA-pinning policy; it supplies the comment verifier's input.
+Requires PyYAML, from the lint group in pyproject.toml:
+
+    uv run --only-group lint python scripts/action-pin-comments.py REPO_ROOT
+
+This does not replace the release rehearsal's SHA-pinning policy; it supplies
+the comment verifier's input.
 """
 
 import re
