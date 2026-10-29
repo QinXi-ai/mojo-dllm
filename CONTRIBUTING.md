@@ -32,6 +32,28 @@ explains each one.
 - **Toolchain bumps stand alone.** Moving Mojo or max-core in `pyproject.toml`
   (and `uv.lock`) is its own commit with a green run.
 
+## Review
+
+I review a pull request at a named head, and if you push after my review I
+review the new commits before I merge. On each one I rerun the CI steps from
+your branch in a container with no network, and check the numbers in the
+description against the repo. The rest depends on what the change touches:
+
+| The change | What I add |
+|---|---|
+| A guard: a bounds, type or format check, or a refusal | I break each clause and expect a named test to fail. |
+| A bug fix | I revert the fix and expect the new test to fail. |
+| Tests only | I break the code that one or two of the new tests cover. |
+| Docs or CI configuration only | Nothing beyond the checks above. |
+
+I can merge your branch once it is up to date with `main`. If it trails `main`
+and merges cleanly, I press Update branch and wait for CI to pass again. If it
+conflicts, I'll ask you to merge `main` into your branch and resolve the
+conflict yourself, since you know the change better than I do. The usual
+conflict is `tests/test-count.txt`: take either side, then run
+`UPDATE_TEST_COUNT=1 scripts/run-tests.sh` on the merged tree to pin the new
+total.
+
 ## Commit messages
 
 An imperative subject under 72 characters, and a body that says why.
