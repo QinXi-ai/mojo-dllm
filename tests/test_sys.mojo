@@ -78,8 +78,9 @@ def test_mapping_empty_file() raises:
 
 
 def test_mapping_rejects_directory() raises:
-    # Linux WSL2/9p: open and lseek succeed, mmap rejects the directory.
-    with assert_raises(contains="mmap failed for tests/fixtures"):
+    # ext4 answers lseek on a directory with a huge offset and tmpfs fails it,
+    # so the filesystem must not decide the message.
+    with assert_raises(contains="is a directory: tests/fixtures"):
         _ = Mapping("tests/fixtures")
 
 
