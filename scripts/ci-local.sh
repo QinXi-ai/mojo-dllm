@@ -58,6 +58,7 @@ step() {
 need() {
     command -v "$1" >/dev/null 2>&1 || {
         echo "missing tool: $1" >&2
+        [ "$1" = uv ] && echo "install it with: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
         return 1
     }
 }
