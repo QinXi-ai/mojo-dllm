@@ -121,8 +121,9 @@ so an unchecked file is used after a warning.
 ```
 
 You get the metadata, a count of tensor types, and every tensor with its
-shape. Any command the launcher does not own (`inspect`, `tokenize`, `logits`)
-goes to `build/mojo-dllm` unchanged, after the same rebuild check.
+shape. The binary's own commands (`inspect`, `tokenize`, `logits`) go to
+`build/mojo-dllm` unchanged, after the same rebuild check. Any other word stops
+with the closest command name.
 
 ## Without the launcher
 
