@@ -331,6 +331,63 @@ def quality() -> str:
     return "\n".join(out)
 
 
+def eval_table() -> str:
+    """GSM8K paired comparisons from bench/eval/*-vs-*.json. Accuracy comes from the
+    full comparison; time per problem from the `--limit` one, a round that had the
+    machine to itself (generate_s in the other rounds carries whatever else ran)."""
+    full: dict[tuple, tuple] = {}
+    timed: dict[tuple, tuple] = {}
+    for f in sorted((ROOT / "bench" / "eval").glob("*-vs-*.json")):
+        doc = json.loads(f.read_text())
+        (timed if doc.get("limit") else full)[tuple(doc["arms"])] = (f, doc)
+    if not full:
+        return ""
+    bases = {a for a, _ in full}
+    if len(bases) != 1:
+        raise SystemExit(f"bench_table: eval comparisons use several baselines: {sorted(bases)}")
+    base = bases.pop()
+    docs = [d for _, d in full.values()]
+    if len({d["accuracy"][base] for d in docs}) != 1 or len({d["problems"] for d in docs}) != 1:
+        raise SystemExit("bench_table: the eval comparisons disagree on the baseline arm")
+    first = docs[0]
+    cfg = first["config"][base]
+
+    def secs(pair: tuple, arm: str) -> str:
+        if pair not in timed:
+            return "not measured"
+        return f"{timed[pair][1]['generate_s_mean'][arm]:.1f} s"
+
+    any_pair = next(iter(full))
+    out = [
+        f"**{pathlib.Path(cfg['model']).name}**, GSM8K, {first['problems']} problems, "
+        f"flags `{' '.join(cfg['flags'])}`, mojo-dllm `{cfg['version']}`.",
+        "",
+        "| Arm | accuracy | vs baseline | 95% CI | discordant | McNemar p | passes / problem | time / problem |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        f"| {base} | {first['accuracy'][base]:.1%} | | | | | "
+        f"{first['forward_passes_mean'][base]:.1f} | {secs(any_pair, base)} |",
+    ]
+    for pair, (f, d) in full.items():
+        arm = pair[1]
+        lo, hi = d["ci95"]
+        out.append(
+            f"| {arm} | {d['accuracy'][arm]:.1%} | {d['difference'] * 100:+.1f} pt | "
+            f"{lo * 100:+.1f} to {hi * 100:+.1f} pt | {d['discordant']['a_only']} / {d['discordant']['b_only']} | "
+            f"{d['mcnemar_p']:.2f} | {d['forward_passes_mean'][arm]:.1f} | {secs(pair, arm)} |"
+        )
+    limits = sorted({d["limit"] for _, d in timed.values()})
+    files = [f for f, _ in full.values()] + [f for f, _ in timed.values()]
+    out += [
+        "",
+        f"Discordant counts problems only the baseline solved / only the arm solved. Time per problem is "
+        f"the mean over the first {', '.join(map(str, limits))} problems of each arm, a round that ran with "
+        "nothing else on the machine.",
+        "",
+        "Evidence: " + ", ".join(f"`bench/eval/{f.name}`" for f in files) + ".",
+    ]
+    return "\n".join(out)
+
+
 def splice(text: str, table: str, start: str = START, end: str = END) -> str:
     if start not in text or end not in text:
         return text
@@ -344,6 +401,7 @@ def main() -> int:
     table = render()
     logit_table, gen_table = parity()
     quality_table = quality()
+    gsm8k_table = eval_table()
     bad = []
     for t in TARGETS:
         if not t.exists():
@@ -354,6 +412,8 @@ def main() -> int:
         new = splice(new, gen_table, "<!-- genparity:start -->", "<!-- genparity:end -->")
         if quality_table:
             new = splice(new, quality_table, "<!-- quality:start -->", "<!-- quality:end -->")
+        if gsm8k_table:
+            new = splice(new, gsm8k_table, "<!-- eval:start -->", "<!-- eval:end -->")
         if mode == "--write":
             t.write_text(new)
             print(f"bench_table: wrote {t.relative_to(ROOT)}")

@@ -26,7 +26,7 @@ def test_documented_booleans_are_parsed_without_values() raises:
         var a = Args(["x", "run", "--" + flag], boolean_flags())
         assert_true(a.has(flag))
         count += 1
-    assert_equal(count, 7)
+    assert_equal(count, 8)
     assert_equal(len(flags), count)
 
 

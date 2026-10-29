@@ -1,0 +1,69 @@
+{
+  "date": "2026-10-29T04:43:57",
+  "problems": 200,
+  "arms": [
+    "baseline",
+    "threshold09"
+  ],
+  "limit": 0,
+  "problems_in_arm": {
+    "baseline": 200,
+    "threshold09": 200
+  },
+  "config": {
+    "baseline": {
+      "flags": [
+        "--max-tokens",
+        "256",
+        "--block-length",
+        "32",
+        "--steps",
+        "256",
+        "--device",
+        "gpu",
+        "--json"
+      ],
+      "version": "3b2dac4",
+      "model": "LLaDA-8B-Instruct.Q4_K_M.gguf"
+    },
+    "threshold09": {
+      "flags": [
+        "--max-tokens",
+        "256",
+        "--block-length",
+        "32",
+        "--steps",
+        "256",
+        "--device",
+        "gpu",
+        "--json",
+        "--threshold",
+        "0.9"
+      ],
+      "version": "3b2dac4",
+      "model": "LLaDA-8B-Instruct.Q4_K_M.gguf"
+    }
+  },
+  "accuracy": {
+    "baseline": 0.805,
+    "threshold09": 0.8
+  },
+  "difference": -0.005,
+  "ci95": [
+    -0.021959946933879246,
+    0.011959946933879244
+  ],
+  "discordant": {
+    "a_only": 2,
+    "b_only": 1
+  },
+  "mcnemar_p": 1.0,
+  "forward_passes_mean": {
+    "baseline": 236.98,
+    "threshold09": 73.39
+  },
+  "generate_s_mean": {
+    "baseline": 118.19241749445,
+    "threshold09": 37.367636453545
+  }
+}

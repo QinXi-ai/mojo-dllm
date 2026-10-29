@@ -161,6 +161,81 @@ def test_logit_row_follows_the_shift() raises:
     assert_equal(l.logit_row(5), 5)
 
 
+def _check_window_exact(path: String) raises:
+    # Right after a full pass nothing in the cache is stale, so recomputing a
+    # window must give the full pass's logits for those rows, bit for bit:
+    # every per-row computation is independent of how rows are grouped.
+    var m = DiffusionLM(FIX + path, threads=2, max_tokens=16, kv_cache=True)
+    var toks = _tokens()
+    var all_rows = List[Int]()
+    for i in range(len(toks)):
+        all_rows.append(i)
+    var full = Floats(len(toks) * VOCAB)
+    m.forward(toks, all_rows, full.ptr())
+    var win: List[Int] = [3, 4, 6]
+    var part = Floats(len(win) * VOCAB)
+    m.forward_window(toks, 3, 7, win, part.ptr())
+    for j in range(len(win)):
+        for v in range(VOCAB):
+            assert_equal(
+                part[j * VOCAB + v],
+                full[win[j] * VOCAB + v],
+                path + " row " + String(win[j]) + " vocab " + String(v),
+            )
+
+
+def test_window_after_full_pass_is_exact_llada() raises:
+    _check_window_exact("tiny-llada.gguf")
+
+
+def test_window_after_full_pass_is_exact_dream() raises:
+    _check_window_exact("tiny-dream.gguf")
+
+
+def test_window_refuses_without_a_matching_cache() raises:
+    var toks = _tokens()
+    var rows: List[Int] = [3]
+    var out = Floats(VOCAB)
+    var no_cache = DiffusionLM(
+        FIX + "tiny-llada.gguf", threads=2, max_tokens=16
+    )
+    with assert_raises(contains="needs the K/V cache"):
+        no_cache.forward_window(toks, 3, 7, rows, out.ptr())
+    var m = DiffusionLM(
+        FIX + "tiny-llada.gguf", threads=2, max_tokens=16, kv_cache=True
+    )
+    with assert_raises(contains="run a full pass first"):
+        m.forward_window(toks, 3, 7, rows, out.ptr())
+
+
+def test_a_failed_pass_invalidates_the_cache() raises:
+    # A pass that raises may have rewritten some cache rows, so the cache no
+    # longer holds any canvas: the next window must ask for a full pass.
+    var toks = _tokens()
+    var all_rows = List[Int]()
+    for i in range(len(toks)):
+        all_rows.append(i)
+    var rows: List[Int] = [3]
+    var full = Floats(len(toks) * VOCAB)
+    var out = Floats(VOCAB)
+    var m = DiffusionLM(
+        FIX + "tiny-llada.gguf", threads=2, max_tokens=16, kv_cache=True
+    )
+    m.forward(toks, all_rows, full.ptr())
+    var bad = toks.copy()
+    bad[5] = VOCAB
+    with assert_raises(contains="outside the vocabulary"):
+        m.forward(bad, all_rows, full.ptr())
+    with assert_raises(contains="run a full pass first"):
+        m.forward_window(toks, 3, 7, rows, out.ptr())
+    # The same holds for a failed window pass.
+    m.forward(toks, all_rows, full.ptr())
+    with assert_raises(contains="outside the vocabulary"):
+        m.forward_window(bad, 3, 7, rows, out.ptr())
+    with assert_raises(contains="run a full pass first"):
+        m.forward_window(toks, 3, 7, rows, out.ptr())
+
+
 def test_config_rejects_missing_layers() raises:
     var g = GGUFFile(FIX + "metadata/missing-llada.block_count.gguf")
     with assert_raises(

@@ -160,6 +160,26 @@ Evidence: `bench/quality/2026-10-03-LLaDA-8B-Instruct.Q4_K_M.json` (mojo-dllm `b
 "Repeated words" counts immediate repetitions such as "the the", a rough
 proxy for parallel-decoding damage. `bench/quality.py` produces this table.
 
+### Accuracy of `--threshold` and `--dual-cache`
+
+Both options change what a step computes, so their answers can differ from
+the plain sampler's. A paired GSM8K run checks how often they still get the
+answer right (`bench/eval_gsm8k.py`, see [Development](development.md)):
+
+<!-- eval:start -->
+**LLaDA-8B-Instruct.Q4_K_M.gguf**, GSM8K, 200 problems, flags `--max-tokens 256 --block-length 32 --steps 256 --device gpu --json`, mojo-dllm `3b2dac4`.
+
+| Arm | accuracy | vs baseline | 95% CI | discordant | McNemar p | passes / problem | time / problem |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 80.5% | | | | | 237.0 | 79.7 s |
+| dualcache | 81.5% | +1.0 pt | -4.4 to +6.4 pt | 14 / 16 | 0.86 | 236.6 | 15.8 s |
+| threshold09 | 80.0% | -0.5 pt | -2.2 to +1.2 pt | 2 / 1 | 1.00 | 73.4 | 24.1 s |
+
+Discordant counts problems only the baseline solved / only the arm solved. Time per problem is the mean over the first 50 problems of each arm, a round that ran with nothing else on the machine.
+
+Evidence: `bench/eval/2026-10-29-baseline-vs-dualcache.json`, `bench/eval/2026-10-29-baseline-vs-threshold09.json`, `bench/eval/2026-10-29-baseline-vs-dualcache-first50.json`, `bench/eval/2026-10-29-baseline-vs-threshold09-first50.json`.
+<!-- eval:end -->
+
 ## Reading the numbers
 
 - **ms / step** is the cost of one denoising pass over the canvas.
