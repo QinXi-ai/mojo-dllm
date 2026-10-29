@@ -40,7 +40,7 @@ class Probes:
 def read_mojo_pin(pyproject: str) -> str:
     match = re.search(r'"mojo==([0-9][^"]*)"', pyproject)
     if match is None:
-        raise RuntimeError("pyproject.toml has no mojo==X pin")
+        raise LauncherError("pyproject.toml has no mojo==X pin; restore it from git, then run ./mojo-dllm doctor again.")
     return match.group(1)
 
 
