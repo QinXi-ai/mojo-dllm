@@ -2,8 +2,8 @@
 name: CI
 
 # The same gates scripts/ci-local.sh runs, split into three parallel jobs.
-# Run them locally first (`scripts/ci-local.sh`, or the pre-push hook): this
-# repository is private for now, and private-repo Actions minutes are metered.
+# Run them locally first (`scripts/ci-local.sh`, or the pre-push hook), so a
+# push reaches CI already green.
 
 on:
   push:
@@ -58,11 +58,11 @@ jobs:
 
       - name: README benchmark numbers come from bench/results
         if: ${{ !cancelled() }}
-        run: uv run --frozen --no-project python scripts/bench_table.py --check
+        run: uv run --no-project python scripts/bench_table.py --check
 
       - name: GSM8K eval harness self-test
         if: ${{ !cancelled() }}
-        run: uv run --frozen --no-project python bench/eval_gsm8k.py --self-test
+        run: uv run --no-project python bench/eval_gsm8k.py --self-test
 
       - name: Action pins match the tags in their comments
         if: ${{ !cancelled() }}
