@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the binary test fixtures under tests/fixtures/.
 
-Run with:  uv run --with gguf==0.17.1 --with numpy==2.3.3 scripts/gen_fixtures.py
+Run with:  uv run --only-group fixtures python scripts/gen_fixtures.py
 
 Python is a development tool here, never a runtime dependency. Every expected
 value comes from llama.cpp's own `gguf` package (its K-quant dequantizers) or

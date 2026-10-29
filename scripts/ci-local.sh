@@ -102,7 +102,8 @@ launcher_tests() {
 }
 claims() {
     need uv && uv run --no-project python scripts/bench_table.py --check &&
-        uv run --no-project python bench/eval_gsm8k.py --self-test
+        uv run --no-project python bench/eval_gsm8k.py --self-test &&
+        timeout 300 uv run --frozen --only-group fixtures python scripts/check_weights.py --self-test
 }
 action_pins() {
     # Resolves each pinned SHA's tag through the GitHub API, so it needs gh.

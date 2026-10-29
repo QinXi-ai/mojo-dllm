@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare GGUF tensor shapes with their safetensors source (headers only).
 
-uv run --with gguf==0.19.0 --with numpy==2.3.3 scripts/check_weights.py MODEL.gguf INDEX.json
+uv run --only-group fixtures python scripts/check_weights.py MODEL.gguf INDEX.json
 The second argument may also be a single .safetensors file. No tensor data is read.
 """
 
@@ -13,6 +13,7 @@ import copy
 import io
 import json
 import math
+import os
 from pathlib import Path
 import re
 import struct
@@ -24,6 +25,8 @@ import numpy as np
 
 def read_header(path: Path) -> dict:
     """Safetensors: an unsigned little-endian length followed by JSON."""
+    if path.exists() and not path.is_file():
+        raise ValueError(f"{path}: is not a regular file")
     with path.open("rb") as stream:
         size = stream.read(8)
         if len(size) != 8:
@@ -86,6 +89,12 @@ def name_map(reader):
     return gguf.get_tensor_name_map(supported[architecture], blocks)
 
 
+def _say(text: str) -> None:
+    """Print a report line; names come from other people's files, so escape
+    anything the terminal would act on."""
+    print(text if text.isprintable() else text.encode("unicode_escape").decode("ascii"))
+
+
 def compare(model: Path, source_path: Path, ignore: str | None = None) -> int:
     counts = dict(compared=0, ok=0, mismatch=0, missing_in_gguf=0,
                   missing_in_source=0, unmapped=0, ignored=0)
@@ -106,16 +115,16 @@ def compare(model: Path, source_path: Path, ignore: str | None = None) -> int:
                     seen.add(mapped)
                 continue
             if mapped is None:
-                print(f"unmapped source name: {name}")
+                _say(f"unmapped source name: {name}")
                 counts["unmapped"] += 1
                 continue
             if mapped in seen:
-                print(f"unmapped source name: {name} duplicates GGUF target {mapped}")
+                _say(f"unmapped source name: {name} duplicates GGUF target {mapped}")
                 counts["unmapped"] += 1
                 continue
             seen.add(mapped)
             if mapped not in targets:
-                print(f"missing in GGUF: {name} -> {mapped}")
+                _say(f"missing in GGUF: {name} -> {mapped}")
                 counts["missing_in_gguf"] += 1
                 continue
             tensor = targets[mapped]
@@ -123,22 +132,22 @@ def compare(model: Path, source_path: Path, ignore: str | None = None) -> int:
             counts["compared"] += 1
             types = f"GGUF {tensor.tensor_type.name}, safetensors {info['dtype']}"
             if shape != info["shape"]:
-                print(f"shape mismatch: {name} -> {mapped}: {info['shape']} vs {shape} ({types})")
+                _say(f"shape mismatch: {name} -> {mapped}: {info['shape']} vs {shape} ({types})")
                 counts["mismatch"] += 1
             else:
-                print(f"OK: {name} -> {mapped}: {shape} ({types})")
+                _say(f"OK: {name} -> {mapped}: {shape} ({types})")
                 counts["ok"] += 1
         for name in sorted(targets.keys() - seen):
             note = "; source may tie its output weights to the embeddings" if name == "output.weight" else ""
-            print(f"missing in safetensors: {name}{note}")
+            _say(f"missing in safetensors: {name}{note}")
             counts["missing_in_source"] += 1
     except Exception as error:
-        print(f"ERROR: {error}")
+        _say(f"ERROR: {error}")
         return_code = 2
     else:
         return_code = 2 if counts["compared"] == 0 else int(any(
             counts[k] for k in ("mismatch", "missing_in_gguf", "missing_in_source", "unmapped")))
-    print("compared {compared}, ok {ok}, mismatch {mismatch}, missing-in-gguf {missing_in_gguf}, "
+    _say("compared {compared}, ok {ok}, mismatch {mismatch}, missing-in-gguf {missing_in_gguf}, "
           "missing-in-source {missing_in_source}, unmapped {unmapped}, ignored {ignored}".format(**counts))
     return return_code
 
@@ -268,6 +277,19 @@ def self_test_inputs(fixtures: Path) -> int:
         assert len(aliases) >= 2
         write_shard(source, {aliases[0]: [512, 256], aliases[1]: [512, 256]})
         expect(source, "duplicates GGUF target token_embd.weight", status=1)
+
+        # Tensor names come from someone else's file: a terminal escape in one
+        # must reach the report as text, not as a command to the terminal.
+        write_shard(source, {name + "\x1b[2J": [512, 256]})
+        expect(source, "unmapped source name: " + name + "\\x1b[2J")
+
+        # Opening a FIFO for reading waits for a writer, so a FIFO named like a
+        # shard would hang the checker before it read a byte.
+        if hasattr(os, "mkfifo"):
+            fifo = directory / "fifo.safetensors"
+            os.mkfifo(fifo)
+            expect(fifo, "is not a regular file")
+            expect(weights({name: fifo.name}), "is not a regular file")
     return runs
 
 

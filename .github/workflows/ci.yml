@@ -64,6 +64,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: uv run --no-project python bench/eval_gsm8k.py --self-test
 
+      - name: check_weights self-test
+        if: ${{ !cancelled() }}
+        # A regression in the FIFO guard hangs instead of failing.
+        timeout-minutes: 5
+        run: uv run --frozen --only-group fixtures python scripts/check_weights.py --self-test
+
       - name: Action pins match the tags in their comments
         if: ${{ !cancelled() }}
         env:
