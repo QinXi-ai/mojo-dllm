@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import io
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from conftest import FakeHub, make_probes
-from launcher.errors import UsageError
+from launcher import wizard
+from launcher.errors import LauncherError, UsageError
 from launcher.ui import Style
 from launcher.verified import VerifiedStore
 from launcher.wizard import SetupArgs, SetupEnv, parse_setup_args, run_setup
@@ -174,3 +176,38 @@ def test_usage_errors() -> None:
     assert parse_setup_args(["--yes", "--no-model", "--model", "x/y"]) == SetupArgs(
         model="x/y", yes=True, no_model=True
     )
+
+
+def _fake_run(monkeypatch: pytest.MonkeyPatch, code: int) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, code)
+
+    monkeypatch.setattr(wizard.subprocess, "run", run)
+    return calls
+
+
+def test_a_failed_uv_sync_stops_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_run(monkeypatch, 1)
+    with pytest.raises(LauncherError, match="uv sync --frozen failed"):
+        wizard.real_sync()
+    assert calls == [["uv", "sync", "--frozen"]]
+
+
+def test_a_good_uv_sync_returns(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_run(monkeypatch, 0)
+    wizard.real_sync()
+
+
+def test_a_failed_smoke_test_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = _fake_run(monkeypatch, 3)
+    with pytest.raises(LauncherError, match="smoke test failed"):
+        wizard.real_smoke(tmp_path / "m.gguf", "cpu")
+    assert calls[0][1:3] == ["run", "--model"] and calls[0][-2:] == ["--device", "cpu"]
+
+
+def test_a_good_smoke_test_returns_the_seconds(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _fake_run(monkeypatch, 0)
+    assert wizard.real_smoke(tmp_path / "m.gguf", "cpu") >= 0.0
