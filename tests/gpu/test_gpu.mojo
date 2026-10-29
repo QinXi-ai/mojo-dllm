@@ -6,7 +6,7 @@ every kernel is compared with the CPU function it replaces.
 """
 
 from std.math import sqrt
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
 from max.gpu.host import DeviceContext, DeviceBuffer
 
@@ -582,6 +582,144 @@ def test_forward_subset_rows_match_full() raises:
     assert_true(worst < 1e-3, "subset rows differ by " + String(worst))
 
 
+def test_attention_more_keys_than_queries_matches_cpu() raises:
+    # With the K/V cache, one block's rows attend over the whole canvas.
+    var ctx = DeviceContext()
+    var L = 9
+    var NK = 40
+    var heads = 4
+    var kvh = 2
+    var hd = 128
+    var q = Floats(L * heads * hd)
+    var k = Floats(NK * kvh * hd)
+    var v = Floats(NK * kvh * hd)
+    _fill(q, 7)
+    _fill(k, 8)
+    _fill(v, 9)
+    for i in range(q.n):
+        q[i] = q[i] * 0.1
+    var want = Floats(L * heads * hd)
+    attention(q.ptr(), k.ptr(), v.ptr(), want.ptr(), L, heads, kvh, hd, 2, NK)
+    var dq = _up(ctx, q)
+    var dk = _up(ctx, k)
+    var dv = _up(ctx, v)
+    var do_ = ctx.enqueue_create_buffer[DType.float32](want.n)
+    attention_gpu(
+        ctx,
+        dev_f32(dq),
+        dev_f32(dk),
+        dev_f32(dv),
+        dev_f32(do_),
+        L,
+        heads,
+        kvh,
+        hd,
+        NK,
+    )
+    var got = _down(ctx, do_, want.n)
+    # The f16 kernel's error against the f32 reference is relative to the
+    # output scale, like the other attention tests (measured about 3e-4 there).
+    var rel = _rel(got, want)
+    assert_true(rel < 2e-3, "attention over cached keys, rel " + String(rel))
+
+
+def _window_rows() -> List[Int]:
+    var r: List[Int] = [3, 4, 6]
+    return r^
+
+
+def test_window_after_full_pass_matches_full() raises:
+    # Right after a full pass the cache is fresh, so a window must give the
+    # full pass's logits for its rows (up to the GEMM tile width, which
+    # depends on the row count).
+    var toks: List[Int] = [5, 17, 300, 511, 511, 42, 511, 7]
+    var all_rows = List[Int]()
+    for i in range(len(toks)):
+        all_rows.append(i)
+    var m = GpuDiffusionLM(
+        FIX + "tiny-llada.gguf", max_tokens=16, kv_cache=True
+    )
+    var full = Floats(len(toks) * 512)
+    m.forward(toks, all_rows, full.ptr())
+    var win = _window_rows()
+    var part = Floats(len(win) * 512)
+    m.forward_window(toks, 3, 7, win, part.ptr())
+    var worst = Float64(0)
+    for j in range(len(win)):
+        for v in range(512):
+            worst = max(
+                worst,
+                abs(
+                    Float64(part[j * 512 + v]) - Float64(full[win[j] * 512 + v])
+                ),
+            )
+    assert_true(worst < 1e-3, "window rows differ by " + String(worst))
+
+
+def test_window_on_a_stale_cache_matches_cpu() raises:
+    # The case the sampler runs: a full pass, then tokens inside the window
+    # change and only the window is recomputed. Keys outside it are stale on
+    # both devices, so the GPU must agree with the CPU window.
+    var toks: List[Int] = [5, 17, 300, 511, 511, 42, 511, 7]
+    var all_rows = List[Int]()
+    for i in range(len(toks)):
+        all_rows.append(i)
+    var cpu = DiffusionLM(
+        FIX + "tiny-llada.gguf", threads=2, max_tokens=16, kv_cache=True
+    )
+    var gpu = GpuDiffusionLM(
+        FIX + "tiny-llada.gguf", max_tokens=16, kv_cache=True
+    )
+    var scratch = Floats(len(toks) * 512)
+    cpu.forward(toks, all_rows, scratch.ptr())
+    gpu.forward(toks, all_rows, scratch.ptr())
+    toks[3] = 250
+    toks[6] = 99
+    var win = _window_rows()
+    var want = Floats(len(win) * 512)
+    var got = Floats(len(win) * 512)
+    cpu.forward_window(toks, 3, 7, win, want.ptr())
+    gpu.forward_window(toks, 3, 7, win, got.ptr())
+    var rel = _rel(got, want)
+    assert_true(rel < 0.02, "stale-cache window gpu vs cpu " + String(rel))
+    for j in range(len(win)):
+        var bg = 0
+        var bw = 0
+        for v in range(512):
+            if got[j * 512 + v] > got[j * 512 + bg]:
+                bg = v
+            if want[j * 512 + v] > want[j * 512 + bw]:
+                bw = v
+        assert_equal(bg, bw, "argmax differs at window row " + String(win[j]))
+
+
+def test_a_failed_gpu_pass_invalidates_the_cache() raises:
+    # The cache is marked valid only after the pass has synchronized, so a
+    # pass that raises leaves a cache the next window refuses.
+    var toks: List[Int] = [5, 17, 300, 511, 511, 42, 511, 7]
+    var all_rows = List[Int]()
+    for i in range(len(toks)):
+        all_rows.append(i)
+    var win = _window_rows()
+    var full = Floats(len(toks) * 512)
+    var out = Floats(len(win) * 512)
+    var gpu = GpuDiffusionLM(
+        FIX + "tiny-llada.gguf", max_tokens=16, kv_cache=True
+    )
+    gpu.forward(toks, all_rows, full.ptr())
+    var bad = toks.copy()
+    bad[5] = 512
+    with assert_raises(contains="outside the vocabulary"):
+        gpu.forward(bad, all_rows, full.ptr())
+    with assert_raises(contains="run a full pass first"):
+        gpu.forward_window(toks, 3, 7, win, out.ptr())
+    gpu.forward(toks, all_rows, full.ptr())
+    with assert_raises(contains="outside the vocabulary"):
+        gpu.forward_window(bad, 3, 7, win, out.ptr())
+    with assert_raises(contains="run a full pass first"):
+        gpu.forward_window(toks, 3, 7, win, out.ptr())
+
+
 def _close(got: Float64, want: Float64, rel: Float64, floor: Float64) -> Bool:
     return abs(got - want) <= rel * abs(want) + floor
 
@@ -675,6 +813,30 @@ def test_generation_with_device_stats_matches_host_scoring() raises:
     assert_equal(len(device.tokens), len(host.tokens))
     for i in range(len(host.tokens)):
         assert_equal(device.tokens[i], host.tokens[i], "token " + String(i))
+
+
+def test_dual_cache_generation_on_the_host_logits_path() raises:
+    # One step per block makes every pass a full refresh, so the cached run
+    # (forward_window, logits on the host) matches the uncached run (device
+    # row statistics). The sampler must not hand forward_window the one-float
+    # logits buffer that the statistics path allocates.
+    var prompt: List[Int] = [5, 17, 300]
+    var c = GenConfig()
+    c.gen_length = 8
+    c.block_length = 4
+    c.steps = 2
+    c.mask_id = 511
+    var plain = GpuDiffusionLM(FIX + "tiny-llada.gguf", max_tokens=16)
+    var a = generate(plain, prompt, c)
+    var cached = GpuDiffusionLM(
+        FIX + "tiny-llada.gguf", max_tokens=16, kv_cache=True
+    )
+    c.dual_cache = True
+    var b = generate(cached, prompt, c)
+    assert_equal(a.forward_passes, b.forward_passes)
+    assert_equal(len(a.tokens), len(b.tokens))
+    for i in range(len(a.tokens)):
+        assert_equal(a.tokens[i], b.tokens[i], "token " + String(i))
 
 
 def main() raises:

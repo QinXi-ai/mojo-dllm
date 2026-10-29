@@ -410,10 +410,14 @@ def attention_gpu(
     heads: Int,
     kv_heads: Int,
     head_dim: Int,
+    n_keys: Int = -1,
 ) raises:
+    """o = softmax(q k^T / sqrt(d)) v for L query rows over n_keys key rows
+    (default L); with a K/V cache the keys are the whole canvas."""
     var scale = Float32(1.0 / sqrt(Float64(head_dim)))
     var grid = (_cdiv(L, AQ), heads)
     var Li = Int32(L)
+    var Lki = Int32(L if n_keys < 0 else n_keys)
     var hi = Int32(heads)
     var kvi = Int32(kv_heads)
     if head_dim == 128:
@@ -423,7 +427,7 @@ def attention_gpu(
             v,
             o,
             Li,
-            Li,
+            Lki,
             hi,
             kvi,
             scale,
@@ -437,7 +441,7 @@ def attention_gpu(
             v,
             o,
             Li,
-            Li,
+            Lki,
             hi,
             kvi,
             scale,

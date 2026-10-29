@@ -45,7 +45,7 @@ def test_documented_booleans_are_parsed_without_values() raises:
         assert_true(a.has(flag))
         assert_equal(len(a.unknown), 0)
         count += 1
-    assert_equal(count, 7)
+    assert_equal(count, 8)
     assert_equal(len(flags), count)
 
 
@@ -93,8 +93,8 @@ def _check(command: String, rest: List[String]) raises -> String:
 
 def test_every_command_declares_its_flags() raises:
     var run = command_spec("run")
-    assert_equal(len(run.values), 10)
-    assert_equal(len(run.booleans), 7)
+    assert_equal(len(run.values), 11)
+    assert_equal(len(run.booleans), 8)
     var tokenize = command_spec("tokenize")
     assert_equal(len(tokenize.values), 2)
     assert_equal(len(tokenize.booleans), 1)

@@ -7,3 +7,4 @@ book/
 __pycache__/
 /models/
 /*.gguf
+bench/eval/runs/PAUSE

@@ -72,6 +72,13 @@ def test_argv_for_the_binary() -> None:
     ]
 
 
+def test_sampler_flags_pass_through() -> None:
+    a = parse_run_args(["Hi", "--threshold", "0.9", "--dual-cache"])
+    assert run_argv(Path("/r/build/mojo-dllm"), Path("/m/x.gguf"), a, "gpu")[-3:] == [
+        "--threshold", "0.9", "--dual-cache",
+    ]
+
+
 def test_boolean_flags_match_the_binary() -> None:
     src = (ROOT / "src/main.mojo").read_text()
     body = src.split("def boolean_flags()", 1)[1].split("return [", 1)[1].split("]", 1)[0]
