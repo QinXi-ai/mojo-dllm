@@ -431,6 +431,7 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
             ),
         )
         self.ctx.synchronize()
+        self._cache_holds(len(tokens))
         self.timings.forwards += 1
         self.timings.total_ns += Int(perf_counter_ns() - t_start)
 
@@ -452,6 +453,7 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
             ),
         )
         self.ctx.synchronize()
+        self._cache_holds(len(tokens))
         self.timings.forwards += 1
         self.timings.total_ns += Int(perf_counter_ns() - t_start)
 
@@ -484,6 +486,7 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
             ),
         )
         self.ctx.synchronize()
+        self._cache_holds(len(tokens))
         var tp = self.host_stat_tok.i32()
         var sp = self.host_stat_val.f64()
         out.tok.clear()
@@ -538,6 +541,10 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
                 raise Error(
                     "output rows must be ascending positions inside the window"
                 )
+        # The cache holds no canvas until this pass has synchronized: one that
+        # raises, here or at the sync, may already have overwritten some rows.
+        if self.kv_cache:
+            self.cache_tokens = -1
         var d = c.hidden
         var kvd = c.kv_dim()
         var t_start = perf_counter_ns()
@@ -660,6 +667,10 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
         self.timings.head_ns += self._gemm(
             self.output, self.qa_h, n_out, dev_f32(self.logits), c.vocab
         )
-        if full and self.kv_cache:
-            self.cache_tokens = L
         return Int(t_start)
+
+    def _cache_holds(mut self, n_tokens: Int):
+        """Mark the K/V cache as holding an n_tokens canvas. Call only after the
+        pass that wrote it has synchronized."""
+        if self.kv_cache:
+            self.cache_tokens = n_tokens

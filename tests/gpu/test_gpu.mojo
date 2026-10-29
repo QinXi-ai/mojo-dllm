@@ -6,7 +6,7 @@ every kernel is compared with the CPU function it replaces.
 """
 
 from std.math import sqrt
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
 from max.gpu.host import DeviceContext, DeviceBuffer
 
@@ -691,6 +691,33 @@ def test_window_on_a_stale_cache_matches_cpu() raises:
             if want[j * 512 + v] > want[j * 512 + bw]:
                 bw = v
         assert_equal(bg, bw, "argmax differs at window row " + String(win[j]))
+
+
+def test_a_failed_gpu_pass_invalidates_the_cache() raises:
+    # The cache is marked valid only after the pass has synchronized, so a
+    # pass that raises leaves a cache the next window refuses.
+    var toks: List[Int] = [5, 17, 300, 511, 511, 42, 511, 7]
+    var all_rows = List[Int]()
+    for i in range(len(toks)):
+        all_rows.append(i)
+    var win = _window_rows()
+    var full = Floats(len(toks) * 512)
+    var out = Floats(len(win) * 512)
+    var gpu = GpuDiffusionLM(
+        FIX + "tiny-llada.gguf", max_tokens=16, kv_cache=True
+    )
+    gpu.forward(toks, all_rows, full.ptr())
+    var bad = toks.copy()
+    bad[5] = 512
+    with assert_raises(contains="outside the vocabulary"):
+        gpu.forward(bad, all_rows, full.ptr())
+    with assert_raises(contains="run a full pass first"):
+        gpu.forward_window(toks, 3, 7, win, out.ptr())
+    gpu.forward(toks, all_rows, full.ptr())
+    with assert_raises(contains="outside the vocabulary"):
+        gpu.forward_window(bad, 3, 7, win, out.ptr())
+    with assert_raises(contains="run a full pass first"):
+        gpu.forward_window(toks, 3, 7, win, out.ptr())
 
 
 def _close(got: Float64, want: Float64, rel: Float64, floor: Float64) -> Bool:

@@ -204,5 +204,33 @@ def test_window_refuses_without_a_matching_cache() raises:
         m.forward_window(toks, 3, 7, rows, out.ptr())
 
 
+def test_a_failed_pass_invalidates_the_cache() raises:
+    # A pass that raises may have rewritten some cache rows, so the cache no
+    # longer holds any canvas: the next window must ask for a full pass.
+    var toks = _tokens()
+    var all_rows = List[Int]()
+    for i in range(len(toks)):
+        all_rows.append(i)
+    var rows: List[Int] = [3]
+    var full = Floats(len(toks) * VOCAB)
+    var out = Floats(VOCAB)
+    var m = DiffusionLM(
+        FIX + "tiny-llada.gguf", threads=2, max_tokens=16, kv_cache=True
+    )
+    m.forward(toks, all_rows, full.ptr())
+    var bad = toks.copy()
+    bad[5] = VOCAB
+    with assert_raises(contains="outside the vocabulary"):
+        m.forward(bad, all_rows, full.ptr())
+    with assert_raises(contains="run a full pass first"):
+        m.forward_window(toks, 3, 7, rows, out.ptr())
+    # The same holds for a failed window pass.
+    m.forward(toks, all_rows, full.ptr())
+    with assert_raises(contains="outside the vocabulary"):
+        m.forward_window(bad, 3, 7, rows, out.ptr())
+    with assert_raises(contains="run a full pass first"):
+        m.forward_window(toks, 3, 7, rows, out.ptr())
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

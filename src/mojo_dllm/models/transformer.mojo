@@ -432,6 +432,10 @@ struct DiffusionLM(DenoisingModel, Movable):
                 raise Error(
                     "output rows must be ascending positions inside the window"
                 )
+        # The cache holds no canvas until this pass completes: one that raises
+        # past here may already have overwritten some of its rows.
+        if self.kv_cache:
+            self.cache_tokens = -1
         var d = c.hidden
         var kvd = c.kv_dim()
         var half = c.head_dim // 2
@@ -603,7 +607,7 @@ struct DiffusionLM(DenoisingModel, Movable):
         var th = perf_counter_ns()
         pgemm(self.output, self.qa_h, n_out, logits, c.vocab, self.threads)
         var t_end = perf_counter_ns()
-        if full and self.kv_cache:
+        if self.kv_cache:
             self.cache_tokens = L
         self.timings.head_ns += Int(t_end - th)
         self.timings.forwards += 1
