@@ -305,17 +305,34 @@ struct GGUFFile(Movable):
         for _ in range(n_kv):
             var key = r.string()
             var kind = Int(r.u32())
+            if key == "general.alignment" and kind != GGUF_TYPE_UINT32:
+                raise Error(
+                    key + " has type " + String(kind) + ", expected UINT32"
+                )
             if kind == GGUF_TYPE_ARRAY:
                 var ek = Int(r.u32())
-                var count = Int(r.u64())
+                var raw_count = r.u64()
+                var count = Int(raw_count)
                 var at = r.at
+                var count_error = (
+                    key + " has invalid array count " + String(raw_count)
+                )
+                if count < 0:
+                    raise Error(count_error)
                 if ek == GGUF_TYPE_STRING:
+                    # Even an empty string needs its uint64 length prefix.
+                    if count > (self.map.size - r.at) // 8:
+                        raise Error(count_error)
                     for _ in range(count):
                         r.skip_string()
                 elif ek == GGUF_TYPE_ARRAY:
                     raise Error("nested GGUF arrays are not supported: " + key)
                 else:
-                    r.skip(count * _scalar_size(ek))
+                    var element_size = _scalar_size(ek)
+                    # Divide first: multiplying an untrusted count can wrap.
+                    if count > (self.map.size - r.at) // element_size:
+                        raise Error(count_error)
+                    r.skip(count * element_size)
                 self.kvs.append(KV(key, kind, at, ek, count))
             else:
                 var at = r.at
@@ -327,6 +344,16 @@ struct GGUFFile(Movable):
                 if key == "general.alignment":
                     var rr = Reader(self.map.addr, self.map.size, at)
                     self.alignment = Int(rr.u32())
+                    if (
+                        self.alignment == 0
+                        or (self.alignment & (self.alignment - 1)) != 0
+                    ):
+                        raise Error(
+                            key
+                            + " has invalid value "
+                            + String(self.alignment)
+                            + "; expected a non-zero power of two"
+                        )
 
         var rel = List[Int]()
         for _ in range(n_tensors):

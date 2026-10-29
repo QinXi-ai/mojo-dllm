@@ -357,6 +357,40 @@ def malformed() -> None:
     patch("scalar-type", part_offset(scalar, 2), 4, 99, 8)
     patch("array-type", part_offset(array, 3), 4, 99, 5)
     patch("nested-array", part_offset(array, 3), 4, 9, 5)
+    patch("array-count-wrapped", part_offset(array, 4), 8, (1 << 62) + 2, 3)
+
+    for label, alignment in (("zero", 0), ("nonpower", 24), ("valid", 64),
+                             ("type", 32), ("array", 32)):
+        w = GGUFWriter(str(out / f"alignment-{label}.gguf"), "test")
+        if label == "type":
+            w.add_uint8("general.alignment", alignment)
+        elif label == "array":
+            w.add_array("general.alignment", [alignment])
+        else:
+            w.add_uint32("general.alignment", alignment)
+        if label == "valid":
+            w.data_alignment = alignment
+        w.add_tensor("f32", np.arange(8, dtype=np.float32))
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+
+    strings_path = out / "string-array.gguf"
+    w = GGUFWriter(str(strings_path), "test")
+    w.add_array("test.strings", ["a", "b"])
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    strings = strings_path.read_bytes()
+    string_field = GGUFReader(str(strings_path)).fields["test.strings"]
+    count_offset = part_offset(string_field, 4)
+    assert int.from_bytes(strings[count_offset:count_offset + 8], "little") == 2
+    for label, count in (("negative", (1 << 64) - 1), ("large", 1 << 62)):
+        data = bytearray(strings)
+        data[count_offset:count_offset + 8] = count.to_bytes(8, "little")
+        (out / f"string-count-{label}.gguf").write_bytes(data)
     tensor = reader.tensors[0]
     assert tensor.name == "f32"
     assert int(tensor.field.parts[2][0]) == 1

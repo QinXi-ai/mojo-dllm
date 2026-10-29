@@ -15,6 +15,65 @@ def test_base_fixture_is_valid() raises:
     assert_equal(g.tensor("q4k").n_elements(), 256)
     assert_equal(g.tensor("q4k").ggml_type, GGML_Q4_K)
     assert_equal(len(g.get_int_array("test.array")), 3)
+    assert_equal(g.alignment, 32)
+    assert_equal(g.tensor("f32").data_offset % 32, 0)
+
+
+def test_rejects_zero_alignment() raises:
+    with assert_raises(contains="general.alignment has invalid value 0"):
+        _ = GGUFFile(FIX + "alignment-zero.gguf")
+
+
+def test_rejects_nonpower_alignment() raises:
+    with assert_raises(contains="general.alignment has invalid value 24"):
+        _ = GGUFFile(FIX + "alignment-nonpower.gguf")
+
+
+def test_rejects_alignment_wrong_type() raises:
+    with assert_raises(
+        contains="general.alignment has type 0, expected UINT32"
+    ):
+        _ = GGUFFile(FIX + "alignment-type.gguf")
+
+
+def test_rejects_alignment_array_type() raises:
+    with assert_raises(
+        contains="general.alignment has type 9, expected UINT32"
+    ):
+        _ = GGUFFile(FIX + "alignment-array.gguf")
+
+
+def test_accepts_explicit_alignment() raises:
+    var g = GGUFFile(FIX + "alignment-valid.gguf")
+    assert_equal(g.alignment, 64)
+    assert_equal(g.tensor("f32").data_offset % 64, 0)
+    assert_equal(g.tensor("f32").n_elements(), 8)
+
+
+def test_rejects_wrapped_scalar_count_on_open() raises:
+    with assert_raises(
+        contains="test.array has invalid array count 4611686018427387906"
+    ):
+        _ = GGUFFile(FIX + "array-count-wrapped.gguf")
+
+
+def test_rejects_negative_string_count_on_open() raises:
+    with assert_raises(
+        contains="test.strings has invalid array count 18446744073709551615"
+    ):
+        _ = GGUFFile(FIX + "string-count-negative.gguf")
+
+
+def test_rejects_oversized_string_count_on_open() raises:
+    with assert_raises(
+        contains="test.strings has invalid array count 4611686018427387904"
+    ):
+        _ = GGUFFile(FIX + "string-count-large.gguf")
+
+
+def test_accepts_string_array() raises:
+    var g = GGUFFile(FIX + "string-array.gguf")
+    assert_equal(len(g.get_str_array("test.strings")), 2)
 
 
 def test_rejects_empty() raises:
