@@ -15,9 +15,10 @@ from launcher import build
 from launcher.doctor import preflight, render
 from launcher.errors import LauncherError, UsageError
 from launcher.gpu import choose_device, parse_nvidia_smi
-from launcher.models import DEFAULT_MODEL, Hub, fetch_model, parse_model_ref, plan_model
+from launcher.models import DEFAULT_MODEL, Hub, fetch_model, parse_model_ref, plan_model, use_cached
 from launcher.probes import Probes
 from launcher.ui import Style, human_size
+from launcher.verified import VerifiedStore, default_store
 
 SMOKE_PROMPT = "Say hello."
 
@@ -47,6 +48,7 @@ def parse_setup_args(argv: list[str]) -> SetupArgs:
 class SetupEnv:
     probes: Probes
     hub: Hub
+    store: VerifiedStore
     is_tty: bool
     ask: Callable[[str], str]
     sync: Callable[[], None]
@@ -115,13 +117,13 @@ def _setup(args: SetupArgs, env: SetupEnv) -> int:
         else:
             plan = plan_model(ref, env.hub)
             if plan.cached is not None:
-                model = plan.cached
+                model = use_cached(plan, env.hub, out, env.store)
                 print(f"already downloaded\n{model}", file=out)
             else:
                 size = f" ({human_size(plan.size)})" if plan.size is not None else ""
                 question = f"Download {plan.label}{size} to {env.hub.cache_dir}? [Y/n]"
                 if _confirm(args, env, question):
-                    model = fetch_model(plan, env.hub, out)
+                    model = fetch_model(plan, env.hub, out, env.store)
                 else:
                     why = "declined" if env.is_tty else "no terminal to ask on; pass --yes to download"
                     print(f"not downloaded ({why})", file=out)
@@ -164,6 +166,7 @@ def real_env() -> SetupEnv:
     return SetupEnv(
         probes=real_probes(),
         hub=RealHub(),
+        store=default_store(),
         is_tty=sys.stdin.isatty() and sys.stdout.isatty(),
         ask=input,
         sync=real_sync,

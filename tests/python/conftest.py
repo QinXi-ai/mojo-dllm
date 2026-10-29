@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from launcher.probes import Probes
+from launcher.verified import VerifiedStore
 
 CPUINFO = "processor\t: 0\nflags\t\t: fpu sse4_2 avx avx2 fma\n"
 MEMINFO = "MemTotal:       16000000 kB\nMemAvailable:   12000000 kB\n"
@@ -50,6 +51,7 @@ class FakeHub:
         self.content = b"gguf bytes"
         self.sha256 = hashlib.sha256(self.content).hexdigest()
         self.downloads: list[tuple[str, str]] = []
+        self.sha_requests = 0
         self._tmp = tmp_path
 
     def list_files(self, repo: str) -> dict[str, int]:
@@ -66,9 +68,15 @@ class FakeHub:
         return path
 
     def expected_sha256(self, repo: str, filename: str) -> str | None:
+        self.sha_requests += 1
         return self.sha256
 
 
 @pytest.fixture
 def hub(tmp_path: Path) -> FakeHub:
     return FakeHub(tmp_path)
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> VerifiedStore:
+    return VerifiedStore(tmp_path / "state" / "verified.json")

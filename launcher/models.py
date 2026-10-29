@@ -11,6 +11,7 @@ from typing import Protocol, TextIO
 
 from launcher.errors import LauncherError
 from launcher.ui import human_size
+from launcher.verified import VerifiedStore
 
 DEFAULT_MODEL = "llada-8b"
 ALIASES = {"llada-8b": ("mradermacher/LLaDA-8B-Instruct-GGUF", "Q4_K_M")}
@@ -115,20 +116,50 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def fetch_model(plan: ModelPlan, hub: Hub, out: TextIO) -> Path:
-    size = f" ({human_size(plan.size)})" if plan.size is not None else ""
-    print(f"Downloading {plan.label}{size}", file=out, flush=True)
-    path = hub.download(plan.repo, plan.filename)
+def _check_sha256(path: Path, plan: ModelPlan, hub: Hub, store: VerifiedStore) -> None:
+    """Compare the file with the hub's sha256; record it on a match, delete it otherwise."""
     expected = hub.expected_sha256(plan.repo, plan.filename)
     if expected is None:
         _delete(path)
         raise LauncherError(f"Hugging Face reported no sha256 for {plan.label}, so the download cannot be verified.")
-    if _sha256(path) != expected:
+    actual = _sha256(path)
+    if actual != expected:
         _delete(path)
         raise LauncherError(
             f"sha256 of {plan.label} does not match the hub's. The file was deleted.\n"
             "Run the command again to download it fresh."
         )
+    store.record(path, actual)
+
+
+def fetch_model(plan: ModelPlan, hub: Hub, out: TextIO, store: VerifiedStore) -> Path:
+    size = f" ({human_size(plan.size)})" if plan.size is not None else ""
+    print(f"Downloading {plan.label}{size}", file=out, flush=True)
+    path = hub.download(plan.repo, plan.filename)
+    _check_sha256(path, plan, hub, store)
+    print("sha256 verified", file=out, flush=True)
+    return path
+
+
+def use_cached(plan: ModelPlan, hub: Hub, out: TextIO, store: VerifiedStore) -> Path:
+    """The cached file, after its sha256 has been checked once.
+
+    An interrupted download, or another tool, can leave an unchecked file in
+    the cache. Offline there is nothing to check against, so it is used with a warning.
+    """
+    path = plan.cached
+    assert path is not None
+    if store.is_verified(path):
+        return path
+    if hub.offline:
+        print(
+            f"warning: {plan.label} in the cache was not verified against its sha256, "
+            "and offline mode cannot check it now",
+            file=out,
+        )
+        return path
+    print(f"Verifying {plan.label} against the hub's sha256 (once)", file=out, flush=True)
+    _check_sha256(path, plan, hub, store)
     print("sha256 verified", file=out, flush=True)
     return path
 
@@ -138,7 +169,7 @@ def _delete(path: Path) -> None:
     path.unlink(missing_ok=True)
 
 
-def ensure_model(text: str, hub: Hub | None, out: TextIO, *, announce_cached: bool) -> Path:
+def ensure_model(text: str, hub: Hub | None, out: TextIO, *, announce_cached: bool, store: VerifiedStore) -> Path:
     """Resolve a model reference to a local file, downloading it when needed."""
     ref = parse_model_ref(text)
     if ref.path is not None:
@@ -146,10 +177,11 @@ def ensure_model(text: str, hub: Hub | None, out: TextIO, *, announce_cached: bo
     assert hub is not None
     plan = plan_model(ref, hub)
     if plan.cached is not None:
+        path = use_cached(plan, hub, out, store)
         if announce_cached:
-            print(f"already downloaded\n{plan.cached}", file=out)
-        return plan.cached
-    path = fetch_model(plan, hub, out)
+            print(f"already downloaded\n{path}", file=out)
+        return path
+    path = fetch_model(plan, hub, out, store)
     if announce_cached:
         print(f"{path} ({human_size(path.stat().st_size)})", file=out)
     return path

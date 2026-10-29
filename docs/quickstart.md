@@ -96,8 +96,12 @@ architecture.
 Hugging Face cache (`~/.cache/huggingface/hub`, or `$HF_HUB_CACHE`), shared
 with every other tool that uses it. A gated or private repo needs `HF_TOKEN`.
 
-The sha256 check runs on download. A file already in the cache is trusted as
-it is; delete it from the cache to fetch it again.
+The sha256 check runs on download. A file already in the cache is checked
+against the hub's sha256 the first time it is used, and the launcher
+remembers the result in `~/.cache/mojo-dllm/verified.json` (under
+`$XDG_CACHE_HOME` when that is set). A file that fails the check is deleted,
+and the next run downloads it again. With `--offline` the check cannot run,
+so an unchecked file is used after a warning.
 
 ## 4. Offline
 

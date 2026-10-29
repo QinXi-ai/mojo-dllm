@@ -14,6 +14,7 @@ from launcher.errors import UsageError
 from launcher.gpu import QUERY, Gpu, choose_device, parse_nvidia_smi
 from launcher.hub import Hub, offline_requested
 from launcher.models import DEFAULT_MODEL, ensure_model
+from launcher.verified import default_store
 
 # Flags of the binary that take no value. A test compares this list with
 # boolean_flags() in src/main.mojo.
@@ -108,7 +109,7 @@ def cmd_run(argv: list[str]) -> int:
     ensure_built()
     hub = Hub(offline=offline_requested(args.offline, os.environ))
     # Progress and status go to stderr so stdout stays the model's text.
-    model = ensure_model(args.model, hub, sys.stderr, announce_cached=False)
+    model = ensure_model(args.model, hub, sys.stderr, announce_cached=False, store=default_store())
     gpus, smi_failure = detect_gpus() if args.device == "auto" else ([], None)
     device = choose_device(args.device, gpus, smi_failure)
     print(device.line, file=sys.stderr, flush=True)
@@ -129,5 +130,7 @@ def cmd_pull(argv: list[str]) -> int:
     if len(refs) > 1:
         raise UsageError("pull takes one model. Usage: ./mojo-dllm pull [MODEL] [--offline]")
     hub = Hub(offline=offline_requested(offline, os.environ))
-    ensure_model(refs[0] if refs else DEFAULT_MODEL, hub, sys.stdout, announce_cached=True)
+    ensure_model(
+        refs[0] if refs else DEFAULT_MODEL, hub, sys.stdout, announce_cached=True, store=default_store()
+    )
     return 0
