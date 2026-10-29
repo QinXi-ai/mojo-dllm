@@ -57,6 +57,10 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Changed
 
+- The GGUF reader rejects a `general.alignment` that is not a uint32 or not a
+  non-zero power of two, and an array whose element count is negative or
+  larger than the bytes left in the file, naming the key (#55, #56). An
+  alignment of 0 used to point tensors at the file header.
 - Model configuration rejects incompatible RoPE widths/scaling and attention
   key lengths, and unsupported-architecture errors list LLaDA and Dream.
 - Matrix load errors name the tensor and distinguish an unsupported type from
