@@ -31,7 +31,8 @@ total_passed=0
 failed_files=()
 for f in "${files[@]}"; do
     name="$(basename "$f" .mojo)"
-    if ! build_out="$($MOJO build -I src "$f" -o "build/tests/$name" 2>&1)"; then
+    # Reuse the CLI's explicit accelerator target on CPU-only hosts too.
+    if ! build_out="$(MOJO="$MOJO" bash scripts/build.sh "$f" "build/tests/$name" 2>&1)"; then
         printf '%s\n' "$build_out" | grep -v Crashpad >&2
         failed_files+=("$name (build)")
         continue

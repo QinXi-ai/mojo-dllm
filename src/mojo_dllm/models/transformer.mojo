@@ -39,7 +39,11 @@ from mojo_dllm.kernels.ops import (
     add_inplace,
     add_bias,
 )
-from mojo_dllm.quant.kquants import dequant_row
+from mojo_dllm.quant.kquants import (
+    dequant_row,
+    check_matrix_type,
+    check_embedding_type,
+)
 from mojo_dllm.sys.mem import F32Ptr, Floats
 
 
@@ -162,6 +166,7 @@ def _load_matrix(
             + String(rows)
             + "]"
         )
+    check_matrix_type(t)
     g.map.populate(g.data_addr(t), t.n_bytes)
     var pm = PackedMatrix(g.data_addr(t), t.ggml_type, rows, cols)
     g.map.drop(g.data_addr(t), t.n_bytes)
@@ -290,6 +295,7 @@ struct DiffusionLM(DenoisingModel, Movable):
         self.threads = threads
         self.max_tokens = max_tokens
         self.embd = self.gguf.tensor("token_embd.weight")
+        check_embedding_type(self.embd)
         if self.embd.ne0 != c.hidden:
             raise Error(
                 "tensor shape mismatch for token_embd.weight: "

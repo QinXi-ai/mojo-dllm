@@ -8,7 +8,9 @@ value comes from llama.cpp's own `gguf` package (its K-quant dequantizers) or
 from a plain numpy forward pass over those dequantized weights, so the Mojo
 code is checked against the reference implementation and not against itself.
 
-Outputs (deterministic, seed 1234):
+Outputs (deterministic, seed 1234 unless noted):
+  tests/fixtures/dequant-types.gguf Q8_0 / Q5_K / BF16 references, separate seed 340034
+  tests/fixtures/unsupported-embedding.gguf minimal IQ2_XXS embedding, no RNG
   tests/fixtures/kquants.gguf      Q4_K / Q6_K / F16 tensors + their f32 dequantization
   tests/fixtures/bad-magic.gguf    a file whose magic is wrong
   tests/fixtures/tiny-llada.gguf   2-layer LLaDA-shaped model, hidden 256, vocab 512
@@ -23,7 +25,7 @@ import pathlib
 import numpy as np
 from gguf import GGMLQuantizationType as Q
 from gguf import GGUFReader, GGUFWriter
-from gguf.quants import dequantize
+from gguf.quants import dequantize, quantize
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "tests" / "fixtures"
@@ -369,14 +371,53 @@ def malformed() -> None:
     (out / "exact-eof.gguf").write_bytes(b"GGUF" + (3).to_bytes(4, "little") + bytes(16))
 
 
+def dequant_types() -> None:
+    """Reference-only types, independent of the existing fixture RNG stream."""
+    rng = np.random.default_rng(340034)
+    w = GGUFWriter(str(OUT / "dequant-types.gguf"), "test")
+    q8 = quantize(rng.standard_normal((4, 96)).astype(np.float32), Q.Q8_0)
+    bf16 = quantize(rng.standard_normal((3, 40)).astype(np.float32), Q.BF16)
+    q5 = rng.integers(0, 256, (8, 176), dtype=np.uint8)
+    q5[:, :2] = f16_bytes(rng.uniform(0.002, 0.01, 8)).reshape(8, 2)
+    q5[:, 2:4] = f16_bytes(rng.uniform(0.002, 0.01, 8)).reshape(8, 2)
+    q5 = q5.reshape(4, 352)
+    for name, data, kind in (("q8_0", q8, Q.Q8_0), ("bf16", bf16, Q.BF16),
+                             ("q5k", q5, Q.Q5_K)):
+        w.add_tensor(name, data, raw_shape=data.shape, raw_dtype=kind)
+        w.add_tensor(name + ".expected", dequantize(data, kind).astype(np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     kquants()
     tiny_llada()
     tiny_dream()
     malformed()
+    dequant_types()
+    unsupported_embedding()
     for p in sorted(OUT.iterdir()):
         print(f"{p.stat().st_size:>9}  {p.relative_to(ROOT)}")
+
+
+def unsupported_embedding() -> None:
+    """Minimal model directory: construction must reject the embedding first."""
+    w = GGUFWriter(str(OUT / "unsupported-embedding.gguf"), "llada")
+    for key, value in {"block_count": 1, "embedding_length": 256,
+                       "attention.head_count": 2, "feed_forward_length": 256,
+                       "vocab_size": 1}.items():
+        w.add_uint32("llada." + key, value)
+    w.add_float32("llada.attention.layer_norm_rms_epsilon", 1e-5)
+    w.add_uint32("tokenizer.ggml.mask_token_id", 0)
+    data = np.zeros((1, 66), dtype=np.uint8)
+    w.add_tensor("token_embd.weight", data, raw_shape=data.shape, raw_dtype=Q.IQ2_XXS)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
 
 
 if __name__ == "__main__":

@@ -8,6 +8,8 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
+- Q8_0 and Q5_K reference decoders, with GGUF type sizing and reference tests
+  for Q8_0, Q5_K and BF16. Matrix kernel support remains Q4_K and Q6_K.
 - Fused elementwise kernels on the GPU: the residual add, the RMSNorm and the
   activation quantization run as one launch (three per layer boundary plus
   the first norm), and `silu(g) * u` is quantized in the same launch as the
@@ -53,6 +55,8 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Changed
 
+- Matrix load errors name the tensor and distinguish an unsupported type from
+  a decodable type without matrix kernels; unsupported embeddings fail at load.
 - The Q6_K GPU GEMM copies each 224-byte block to shared memory as it is,
   unpacks the A fragments in registers and prefetches the next super-block,
   as the Q4_K kernel does. The staged block grows from 212 to 224 bytes (74.6
