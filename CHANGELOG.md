@@ -41,6 +41,9 @@ semantic versioning (0.y: minor bumps may break things).
 - `--dual-cache` (LLaDA, CPU and GPU): keys and values for every position
   are cached at the first step of a block, and the block's other steps
   recompute only its own rows, as Fast-dLLM's DualCache does.
+  [Benchmarks](docs/benchmarks.md) has the GSM8K-200 comparison of both
+  options with the plain sampler, rendered from `bench/eval/` by
+  `scripts/bench_table.py`; `compare --limit N` times one round.
 
 - NVIDIA GPU backend, `--device gpu`, for compute capability 8.0 and newer.
   Projections read the GGUF Q4_K / Q6_K blocks on the GPU and multiply on the

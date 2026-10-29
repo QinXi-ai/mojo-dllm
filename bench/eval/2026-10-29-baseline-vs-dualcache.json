@@ -1,0 +1,68 @@
+{
+  "date": "2026-10-29T04:43:56",
+  "problems": 200,
+  "arms": [
+    "baseline",
+    "dualcache"
+  ],
+  "limit": 0,
+  "problems_in_arm": {
+    "baseline": 200,
+    "dualcache": 200
+  },
+  "config": {
+    "baseline": {
+      "flags": [
+        "--max-tokens",
+        "256",
+        "--block-length",
+        "32",
+        "--steps",
+        "256",
+        "--device",
+        "gpu",
+        "--json"
+      ],
+      "version": "3b2dac4",
+      "model": "LLaDA-8B-Instruct.Q4_K_M.gguf"
+    },
+    "dualcache": {
+      "flags": [
+        "--max-tokens",
+        "256",
+        "--block-length",
+        "32",
+        "--steps",
+        "256",
+        "--device",
+        "gpu",
+        "--json",
+        "--dual-cache"
+      ],
+      "version": "3b2dac4",
+      "model": "LLaDA-8B-Instruct.Q4_K_M.gguf"
+    }
+  },
+  "accuracy": {
+    "baseline": 0.805,
+    "dualcache": 0.815
+  },
+  "difference": 0.01,
+  "ci95": [
+    -0.04365891538225498,
+    0.06365891538225497
+  ],
+  "discordant": {
+    "a_only": 14,
+    "b_only": 16
+  },
+  "mcnemar_p": 0.855535551905632,
+  "forward_passes_mean": {
+    "baseline": 236.98,
+    "dualcache": 236.555
+  },
+  "generate_s_mean": {
+    "baseline": 118.19241749445,
+    "dualcache": 21.57122396135
+  }
+}

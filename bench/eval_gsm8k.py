@@ -155,8 +155,16 @@ def arm_config(name: str, rows: dict[int, dict]) -> dict:
     return dict(flags=json.loads(flags), version=version, model=model)
 
 
-def cmd_compare(a_name: str, b_name: str) -> int:
-    A, B = load_arm(a_name), load_arm(b_name)
+def first_rows(rows: dict[int, dict], limit: int) -> dict[int, dict]:
+    """The first `limit` problems in run order (all of them for 0): one round of a
+    rerun-safe arm, e.g. the round that had the machine to itself."""
+    if limit < 0:
+        raise SystemExit("--limit must be 0 (all) or positive")
+    return dict(list(rows.items())[:limit]) if limit else rows
+
+
+def cmd_compare(a_name: str, b_name: str, limit: int = 0) -> int:
+    A, B = first_rows(load_arm(a_name), limit), first_rows(load_arm(b_name), limit)
     ca, cb = arm_config(a_name, A), arm_config(b_name, B)
     if ca["model"] != cb["model"]:
         raise SystemExit(f"the arms ran different models: {ca['model']} vs {cb['model']}")
@@ -168,7 +176,7 @@ def cmd_compare(a_name: str, b_name: str) -> int:
     c = sum(1 for i in common if not A[i]["correct"] and B[i]["correct"])
     d, lo, hi = paired_ci(b, c, n)
     doc = dict(
-        date=dt.datetime.now().isoformat(timespec="seconds"), problems=n, arms=[a_name, b_name],
+        date=dt.datetime.now().isoformat(timespec="seconds"), problems=n, arms=[a_name, b_name], limit=limit,
         problems_in_arm={a_name: len(A), b_name: len(B)},
         config={a_name: ca, b_name: cb},
         accuracy={a_name: sum(A[i]["correct"] for i in common) / n, b_name: sum(B[i]["correct"] for i in common) / n},
@@ -178,7 +186,8 @@ def cmd_compare(a_name: str, b_name: str) -> int:
         generate_s_mean={a_name: sum(A[i]["generate_s"] for i in common) / n,
                          b_name: sum(B[i]["generate_s"] for i in common) / n},
     )
-    out = ROOT / "bench" / "eval" / f"{dt.date.today().isoformat()}-{a_name}-vs-{b_name}.json"
+    suffix = f"-first{limit}" if limit else ""
+    out = ROOT / "bench" / "eval" / f"{dt.date.today().isoformat()}-{a_name}-vs-{b_name}{suffix}.json"
     out.write_text(json.dumps(doc, indent=2) + "\n")
     print(json.dumps({k: doc[k] for k in ("problems", "accuracy", "difference", "ci95", "discordant",
                                            "mcnemar_p", "forward_passes_mean", "generate_s_mean")}, indent=1))
@@ -202,6 +211,9 @@ def self_test() -> int:
     assert mcnemar_exact(5, 5) == 1.0 and mcnemar_exact(0, 0) == 1.0, "mcnemar ties"
     d, lo, hi = paired_ci(2, 6, 200)
     assert abs(d - 0.02) < 1e-12 and lo < d < hi, "paired ci"
+    order = {7: {"i": 0}, 3: {"i": 1}, 9: {"i": 2}}
+    assert list(first_rows(order, 2)) == [7, 3], "first_rows keeps run order"
+    assert first_rows(order, 0) is order and len(first_rows(order, 5)) == 3, "first_rows bounds"
     lines = [json.loads(l) for l in DATA.read_text().splitlines()]
     assert len(lines) == 200 and all(canon(r["answer"]) is not None for r in lines), "dataset"
     if bad:
@@ -233,10 +245,11 @@ def main() -> int:
     c = sub.add_parser("compare")
     c.add_argument("a")
     c.add_argument("b")
+    c.add_argument("--limit", type=int, default=0, help="compare only each arm's first N problems in run order")
     args = ap.parse_args(argv)
     if args.cmd == "run":
         return cmd_run(args, extra)
-    return cmd_compare(args.a, args.b)
+    return cmd_compare(args.a, args.b, args.limit)
 
 
 if __name__ == "__main__":

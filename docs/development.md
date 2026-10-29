@@ -114,7 +114,15 @@ baseline before it becomes a default.
 python3 bench/eval_gsm8k.py run --model M.gguf --arm baseline
 python3 bench/eval_gsm8k.py run --model M.gguf --arm candidate -- --some-flag
 python3 bench/eval_gsm8k.py compare baseline candidate
+python3 bench/eval_gsm8k.py compare baseline candidate --limit 50
 ```
+
+`compare` writes `bench/eval/<date>-<a>-vs-<b>.json`, and
+`scripts/bench_table.py` turns those files into the accuracy table in
+[Benchmarks](benchmarks.md). Time per problem depends on what else the
+machine runs, so `--limit N` compares each arm's first N problems in run
+order and writes a `-firstN` file; the table takes its times from that file.
+Run that round with nothing else on the machine.
 
 ## Toolchain
 
