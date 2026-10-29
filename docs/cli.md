@@ -7,6 +7,11 @@ mojo-dllm inspect  PATH
 mojo-dllm logits   --model PATH --tokens IDS --rows POSITIONS --out FILE [--threads N] [--device D]
 ```
 
+`mojo-dllm COMMAND --help` (or `-h`) prints that command's usage and exits 0.
+`mojo-dllm`, `mojo-dllm help` and `mojo-dllm --help` print the usage of every
+command. Each command declares its flags: a flag the command does not declare
+stops the run (see [Errors](#errors)).
+
 ## `run`
 
 | Flag | Default | Meaning |
@@ -54,7 +59,20 @@ tests use it; see [Correctness](correctness.md).
 
 ## Errors
 
-Errors name the thing that is wrong and exit with status 1:
+An error names the thing that is wrong. Usage errors exit with status 2 and
+change nothing; every other error exits with status 1.
+
+| Message | Cause and next step |
+|---|---|
+| `ERROR: unknown flag --stpes for 'run' (did you mean --steps?)` | The command does not declare the flag. The parenthesis appears when a declared flag is at most 2 edits away. The next line is `see: mojo-dllm run --help` |
+| `ERROR: missing required flag --model for 'run'` | A required flag is absent. The usage of the command follows |
+| `ERROR: missing model path for 'inspect'` | `inspect` takes the path as an argument. The usage follows |
+| `ERROR: unexpected argument 'x' for 'run'` | `run`, `tokenize` and `logits` take flags only |
+| `ERROR: flag --prompt needs a value` | A value flag is the last argument |
+| `ERROR: cannot open model file PATH: No such file or directory` | The path is wrong or unreadable. The reason is the operating system's. The next line is `to download a model, run: ./mojo-dllm pull` |
+| `ERROR: PATH is not a GGUF file (bad magic).` | A failed download leaves an HTML error page with a `.gguf` name. Delete the file and run `./mojo-dllm pull` again |
+
+The remaining errors exit with status 1 and come from the model file itself:
 
 ```text
 ERROR: unsupported GGUF tensor type: IQ2_XXS
