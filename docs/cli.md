@@ -83,8 +83,9 @@ change nothing; every other error exits with status 1.
 The remaining errors exit with status 1 and come from the model file itself:
 
 ```text
-ERROR: unsupported GGUF tensor type: IQ2_XXS
-ERROR: unsupported model architecture: qwen2
+ERROR: unsupported GGUF tensor type: IQ2_XXS (tensor blk.0.attn_q.weight)
+ERROR: tensor blk.0.attn_q.weight is Q8_0: matrix kernels exist for Q4_K and Q6_K
+ERROR: unsupported model architecture: qwen2 (supported: llada, dream)
 ERROR: required metadata key missing: tokenizer.ggml.model
 ERROR: tensor shape mismatch for blk.0.attn_q.weight: [4096, 2048], expected [4096, 4096]
 ERROR: no GPU found: the GPU backend needs an NVIDIA GPU with compute capability 8.0 or newer (run with --device cpu)

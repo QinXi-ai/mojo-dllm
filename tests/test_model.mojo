@@ -91,7 +91,11 @@ def test_rejects_too_long_input() raises:
 
 
 def test_rejects_wrong_architecture() raises:
-    with assert_raises(contains="unsupported model architecture: test"):
+    with assert_raises(
+        contains=(
+            "unsupported model architecture: test (supported: llada, dream)"
+        )
+    ):
         _ = DiffusionLM(FIX + "kquants.gguf", threads=1, max_tokens=4)
 
 
@@ -155,6 +159,146 @@ def test_logit_row_follows_the_shift() raises:
     assert_equal(d.logit_row(5), 4)
     var l = DiffusionLM(FIX + "tiny-llada.gguf", threads=2, max_tokens=8)
     assert_equal(l.logit_row(5), 5)
+
+
+def test_config_rejects_missing_layers() raises:
+    var g = GGUFFile(FIX + "metadata/missing-llada.block_count.gguf")
+    with assert_raises(
+        contains="required metadata key missing: llada.block_count"
+    ):
+        _ = ModelConfig(g)
+
+
+def test_config_rejects_missing_hidden() raises:
+    var g = GGUFFile(FIX + "metadata/missing-llada.embedding_length.gguf")
+    with assert_raises(
+        contains="required metadata key missing: llada.embedding_length"
+    ):
+        _ = ModelConfig(g)
+
+
+def test_config_rejects_missing_heads() raises:
+    var g = GGUFFile(FIX + "metadata/missing-llada.attention.head_count.gguf")
+    with assert_raises(
+        contains="required metadata key missing: llada.attention.head_count"
+    ):
+        _ = ModelConfig(g)
+
+
+def test_config_rejects_missing_ffn() raises:
+    var g = GGUFFile(FIX + "metadata/missing-llada.feed_forward_length.gguf")
+    with assert_raises(
+        contains="required metadata key missing: llada.feed_forward_length"
+    ):
+        _ = ModelConfig(g)
+
+
+def test_config_rejects_missing_epsilon() raises:
+    var g = GGUFFile(
+        FIX + "metadata/missing-llada.attention.layer_norm_rms_epsilon.gguf"
+    )
+    with assert_raises(
+        contains=(
+            "required metadata key missing:"
+            " llada.attention.layer_norm_rms_epsilon"
+        )
+    ):
+        _ = ModelConfig(g)
+
+
+def test_config_rejects_missing_mask() raises:
+    var g = GGUFFile(FIX + "metadata/missing-tokenizer.ggml.mask_token_id.gguf")
+    with assert_raises(
+        contains="required metadata key missing: tokenizer.ggml.mask_token_id"
+    ):
+        _ = ModelConfig(g)
+
+
+def test_config_rejects_kv_head_shape() raises:
+    var g = GGUFFile(FIX + "metadata/kv-heads.gguf")
+    with assert_raises(contains="query heads are not a multiple of KV heads"):
+        _ = ModelConfig(g)
+
+
+def test_config_rejects_hidden_shape() raises:
+    var g = GGUFFile(FIX + "metadata/hidden-size.gguf")
+    with assert_raises(
+        contains="hidden size is not divisible by the head count"
+    ):
+        _ = ModelConfig(g)
+
+
+def test_config_rejects_rope_width() raises:
+    var g = GGUFFile(FIX + "metadata/rope-width.gguf")
+    with assert_raises(
+        contains=(
+            "llada.rope.dimension_count must equal head dimension 128, got 64"
+        )
+    ):
+        _ = ModelConfig(g)
+
+
+def test_config_rejects_key_length() raises:
+    var g = GGUFFile(FIX + "metadata/key-length.gguf")
+    with assert_raises(contains="llada.attention.key_length"):
+        _ = ModelConfig(g)
+
+
+def test_config_rejects_rope_scaling_type() raises:
+    var g = GGUFFile(FIX + "metadata/rope-type.gguf")
+    with assert_raises(contains="llada.rope.scaling.type"):
+        _ = ModelConfig(g)
+
+
+def test_config_rejects_rope_scaling_factor() raises:
+    var g = GGUFFile(FIX + "metadata/rope-factor.gguf")
+    with assert_raises(contains="llada.rope.scaling.factor must be 1, got 4"):
+        _ = ModelConfig(g)
+
+
+def test_config_accepts_defaults() raises:
+    var g = GGUFFile(FIX + "metadata/defaults.gguf")
+    var c = ModelConfig(g)
+    assert_equal(c.head_dim, 128)
+    assert_equal(c.n_kv_heads, 4)
+    assert_equal(c.vocab, 512)
+    assert_equal(c.ctx, 4096)
+    assert_equal(c.theta, 10000.0)
+    assert_true(not c.shift_logits)
+
+
+def test_config_accepts_compatible_none() raises:
+    var g = GGUFFile(FIX + "metadata/compatible-none.gguf")
+    var c = ModelConfig(g)
+    assert_equal(c.head_dim, 128)
+    assert_equal(c.n_kv_heads, 4)
+    assert_equal(c.vocab, 512)
+    assert_equal(c.ctx, 4096)
+    assert_equal(c.theta, 10000.0)
+    assert_true(not c.shift_logits)
+
+
+def test_config_accepts_compatible_linear() raises:
+    var g = GGUFFile(FIX + "metadata/compatible-linear.gguf")
+    var c = ModelConfig(g)
+    assert_equal(c.head_dim, 128)
+    assert_equal(c.n_kv_heads, 4)
+    assert_equal(c.vocab, 512)
+    assert_equal(c.ctx, 4096)
+    assert_equal(c.theta, 10000.0)
+    assert_true(not c.shift_logits)
+
+
+def test_config_wrong_rotary_width_type_names_key() raises:
+    var g = GGUFFile(FIX + "metadata/rope-width-type.gguf")
+    with assert_raises(contains="metadata key llada.rope.dimension_count"):
+        _ = ModelConfig(g)
+
+
+def test_config_wrong_scaling_factor_type_names_key() raises:
+    var g = GGUFFile(FIX + "metadata/rope-factor-type.gguf")
+    with assert_raises(contains="metadata key llada.rope.scaling.factor"):
+        _ = ModelConfig(g)
 
 
 def main() raises:

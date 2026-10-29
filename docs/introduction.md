@@ -35,7 +35,7 @@ minutes](diffusion.md) walks through it with a picture.
 - The GPU path is slower than llama.cpp's CUDA build; [Benchmarks](benchmarks.md)
   has the numbers. It supports NVIDIA only.
 - Two architectures: LLaDA and Dream. Others stop with
-  `unsupported model architecture: <name>`.
+  `unsupported model architecture: <name> (supported: llada, dream)`.
 - One quantization mix: the F32, Q4_K and Q6_K tensors a Q4_K_M file
   contains. Any other tensor type stops the load with an error that names it.
 

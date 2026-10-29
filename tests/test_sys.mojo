@@ -121,9 +121,8 @@ def test_page_ranges() raises:
     var aligned_lo, aligned_hi = drop_range(4096, 4096)
     assert_equal(aligned_lo, 4096)
     assert_equal(aligned_hi, 8192)
-    var m = Mapping("tests/fixtures/bad-magic.gguf")
-    m.drop(m.addr + 1, 10)
-    assert_equal(m.ptr().unsafe_load(0), UInt8(0x47))
+    # Read-back after madvise cannot establish whether a page was dropped:
+    # file-backed mappings read the same bytes again. Test the range directly.
 
 
 def check_parallel(n: Int, threads: Int) raises:

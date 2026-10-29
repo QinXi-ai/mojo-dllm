@@ -32,6 +32,7 @@ comptime GGML_F32 = 0
 comptime GGML_F16 = 1
 comptime GGML_Q8_0 = 8
 comptime GGML_Q4_K = 12
+comptime GGML_Q5_K = 13
 comptime GGML_Q6_K = 14
 comptime GGML_BF16 = 30
 
@@ -102,6 +103,8 @@ def ggml_row_bytes(t: Int, n: Int) raises -> Int:
         return n // 32 * 34
     if t == GGML_Q4_K:
         return n // 256 * 144
+    if t == GGML_Q5_K:
+        return n // 256 * 176
     if t == GGML_Q6_K:
         return n // 256 * 210
     raise Error("unsupported GGUF tensor type: " + ggml_type_name(t))
@@ -117,7 +120,7 @@ def _tensor_bytes(t: Int, ne0: Int, rows: Int) -> Int:
 def ggml_block_size(t: Int) -> Int:
     if t == GGML_Q8_0:
         return 32
-    if t == GGML_Q4_K or t == GGML_Q6_K:
+    if t == GGML_Q4_K or t == GGML_Q5_K or t == GGML_Q6_K:
         return 256
     return 1
 
@@ -390,7 +393,10 @@ struct GGUFFile(Movable):
 
     def get_int(self, key: String) raises -> Int:
         var kv = self._kv(key)
-        return self._read_scalar_int(kv.kind, kv.at)
+        try:
+            return self._read_scalar_int(kv.kind, kv.at)
+        except e:
+            raise Error("metadata key " + key + ": " + String(e))
 
     def get_int_or(self, key: String, default: Int) raises -> Int:
         if not self.has_key(key):
@@ -404,7 +410,10 @@ struct GGUFFile(Movable):
             return bitcast[DType.float32](UInt32(r.u32()))
         if kv.kind == GGUF_TYPE_FLOAT64:
             return Float32(bitcast[DType.float64](r.u64()))
-        return Float32(self._read_scalar_int(kv.kind, kv.at))
+        try:
+            return Float32(self._read_scalar_int(kv.kind, kv.at))
+        except e:
+            raise Error("metadata key " + key + ": " + String(e))
 
     def get_f32_or(self, key: String, default: Float32) raises -> Float32:
         if not self.has_key(key):
