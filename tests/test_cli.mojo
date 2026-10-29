@@ -3,16 +3,19 @@ from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 
 from cli.args import Args
 from mojo_dllm.formats.gguf import GGUFFile
+from mojo_dllm.sys.mmap import Mapping
 from main import (
+    Decision,
     boolean_flags,
     chat_prompt,
     check_args,
     command_spec,
+    decide,
+    execute,
     json_str,
     _csv,
     is_top_level_help,
     model_error,
-    open_failure_reason,
     usage,
     usage_for,
 )
@@ -262,10 +265,239 @@ def test_help_routing() raises:
     assert_true(a.has("help"))
 
 
+def _decide(command: String, rest: List[String]) raises -> Decision:
+    var argv = List[String](["mojo-dllm", command])
+    for r in rest:
+        argv.append(r)
+    return decide(argv)
+
+
+def test_unknown_command_is_a_usage_error() raises:
+    var d = _decide("bogus", [])
+    assert_equal(d.code, 2)
+    assert_true(d.is_error)
+    assert_equal(d.text, "unknown command: bogus\nsee: mojo-dllm --help")
+    assert_equal(execute(["mojo-dllm", "bogus"]), 2)
+
+
+def test_help_exits_zero_and_wins_over_other_problems() raises:
+    for command in List[String](["", "help", "--help", "-h"]):
+        var d = _decide(command, [])
+        assert_equal(d.code, 0)
+        assert_true(not d.is_error)
+        assert_equal(d.text, usage())
+    for command in List[String](["run", "tokenize", "inspect", "logits"]):
+        var d = _decide(command, ["--stpes", "--steps", "abc", "--help"])
+        assert_equal(d.code, 0)
+        assert_equal(d.text, usage_for(command))
+        assert_true(not d.proceed)
+    # --help before a value flag that has no value: help, not "needs a value".
+    var late = _decide("run", ["--help", "--prompt"])
+    assert_equal(late.code, 0)
+    assert_equal(late.text, usage_for("run"))
+    assert_equal(execute(["mojo-dllm", "run", "--help", "--prompt"]), 0)
+    assert_equal(execute(["mojo-dllm", "--help"]), 0)
+
+
+def test_usage_errors_exit_two() raises:
+    var unknown = _decide("run", ["--stpes", "3"])
+    assert_equal(unknown.code, 2)
+    assert_true(unknown.is_error)
+    var missing = _decide("run", ["--model", "m", "--prompt"])
+    assert_equal(missing.code, 2)
+    assert_equal(
+        missing.text,
+        "flag --prompt needs a value\nsee: mojo-dllm run --help",
+    )
+    var number = _decide(
+        "run", ["--model", "m", "--prompt", "p", "--steps", "abc"]
+    )
+    assert_equal(number.code, 2)
+    assert_equal(
+        number.text,
+        "flag --steps needs an integer, got 'abc'\nsee: mojo-dllm run --help",
+    )
+    assert_equal(execute(["mojo-dllm", "run", "--stpes", "3"]), 2)
+    assert_equal(execute(["mojo-dllm", "run", "--prompt"]), 2)
+    assert_equal(
+        execute(
+            [
+                "mojo-dllm",
+                "run",
+                "--model",
+                "m",
+                "--prompt",
+                "p",
+                "--steps",
+                "x",
+            ]
+        ),
+        2,
+    )
+
+
+def test_valid_arguments_proceed() raises:
+    var d = _decide("run", ["--model", "m", "--prompt", "p"])
+    assert_equal(d.code, 0)
+    assert_true(d.proceed)
+    assert_true(not d.is_error)
+
+
+def test_runtime_failure_exits_one() raises:
+    assert_equal(
+        execute(
+            [
+                "mojo-dllm",
+                "run",
+                "--model",
+                "/nonexistent/model.gguf",
+                "--prompt",
+                "hi",
+            ]
+        ),
+        1,
+    )
+    assert_equal(execute(["mojo-dllm", "inspect", "tests/fixtures"]), 1)
+
+
+def test_integer_flags_name_the_flag_and_the_value() raises:
+    var base = List[String](["--model", "m", "--prompt", "p"])
+    for flag in List[String](
+        ["max-tokens", "steps", "block-length", "seed", "threads"]
+    ):
+        for bad in List[String](["abc", "", "12.5", "99999999999999999999"]):
+            var rest = base.copy()
+            rest.append("--" + flag)
+            rest.append(bad)
+            assert_equal(
+                _check("run", rest),
+                "flag --"
+                + flag
+                + " needs an integer, got '"
+                + bad
+                + "'\nsee: mojo-dllm run --help",
+            )
+    var logits = _check(
+        "logits",
+        [
+            "--model",
+            "m",
+            "--tokens",
+            "1",
+            "--rows",
+            "0",
+            "--out",
+            "o",
+            "--threads",
+            "many",
+        ],
+    )
+    assert_equal(
+        logits,
+        (
+            "flag --threads needs an integer, got 'many'\nsee: mojo-dllm logits"
+            " --help"
+        ),
+    )
+
+
+def test_values_that_can_never_be_valid_are_refused() raises:
+    var base = List[String](["--model", "m", "--prompt", "p"])
+    for flag in List[String](
+        ["max-tokens", "steps", "block-length", "threads"]
+    ):
+        for bad in List[String](["0", "-3"]):
+            var rest = base.copy()
+            rest.append("--" + flag)
+            rest.append(bad)
+            assert_equal(
+                _check("run", rest),
+                "flag --"
+                + flag
+                + " must be at least 1, got "
+                + bad
+                + "\nsee: mojo-dllm run --help",
+            )
+    var rest = base.copy()
+    rest.append("--temperature")
+    rest.append("-0.5")
+    assert_equal(
+        _check("run", rest),
+        (
+            "flag --temperature must be at least 0, got -0.5\nsee: mojo-dllm"
+            " run --help"
+        ),
+    )
+    for bad in List[String](["warm", "nan", "inf", ""]):
+        var r = base.copy()
+        r.append("--temperature")
+        r.append(bad)
+        assert_equal(
+            _check("run", r),
+            "flag --temperature needs a finite number, got '"
+            + bad
+            + "'\nsee: mojo-dllm run --help",
+        )
+    # Negative seeds and zero temperature stay valid.
+    var ok = base.copy()
+    ok.append("--seed")
+    ok.append("-5")
+    ok.append("--temperature")
+    ok.append("0")
+    assert_equal(_check("run", ok), "")
+
+
+def test_csv_flags_of_logits_are_checked() raises:
+    var message = _check(
+        "logits",
+        ["--model", "m", "--tokens", "1,x", "--rows", "0", "--out", "o"],
+    )
+    assert_equal(
+        message,
+        (
+            "flag --tokens needs comma-separated integers, got '1,x'\nsee:"
+            " mojo-dllm logits --help"
+        ),
+    )
+
+
+def test_equals_form_says_how_values_are_given() raises:
+    assert_equal(
+        _check("run", ["--model=x"]),
+        (
+            "unknown flag --model=x for 'run'\nflags take their value as the"
+            " next argument: --model x\nsee: mojo-dllm run --help"
+        ),
+    )
+    # A boolean has no value to give, and an undeclared name gets no advice.
+    assert_equal(
+        _check("run", ["--json=1"]),
+        (
+            "unknown flag --json=1 for 'run' (did you mean --json?)\nsee:"
+            " mojo-dllm run --help"
+        ),
+    )
+
+
+def test_inspect_rejects_a_second_path() raises:
+    assert_equal(
+        _check("inspect", ["a", "b"]),
+        "unexpected argument 'b' for 'inspect'\nsee: mojo-dllm inspect --help",
+    )
+
+
+def _mapping_error(path: String) -> String:
+    try:
+        _ = Mapping(path)
+    except e:
+        return model_error(String(e))
+    return String("opened")
+
+
 def test_missing_model_file_hint() raises:
     var path = "/nonexistent/model.gguf"
     assert_equal(
-        model_error("cannot open file: " + path),
+        _mapping_error(path),
         "cannot open model file "
         + path
         + ": No such file or directory\nto download a model, run: ./mojo-dllm"
@@ -273,10 +505,27 @@ def test_missing_model_file_hint() raises:
     )
 
 
-def test_open_failure_reason_comes_from_the_os() raises:
+def test_missing_model_file_hint_with_quote_colon_in_path() raises:
+    var path = "/nonexistent/x': y"
     assert_equal(
-        open_failure_reason("/nonexistent/model.gguf"),
-        "No such file or directory",
+        _mapping_error(path),
+        "cannot open model file "
+        + path
+        + ": No such file or directory\nto download a model, run: ./mojo-dllm"
+        " pull",
+    )
+
+
+def test_other_open_failures_get_no_pull_hint() raises:
+    # ENOTDIR: a path below a regular file. EACCES takes the same branch.
+    var path = "tests/fixtures/bad-magic.gguf/x"
+    assert_equal(
+        _mapping_error(path),
+        "cannot open model file " + path + ": Not a directory",
+    )
+    assert_equal(
+        model_error("cannot open file: m.gguf: Permission denied"),
+        "cannot open model file m.gguf: Permission denied",
     )
 
 

@@ -10,7 +10,8 @@
     mojo-dllm logits   --model M --tokens 1,2,3 --rows 0,2 --out logits.f32 [--threads N] [--device cpu|gpu]
 """
 
-from std.ffi import external_call, c_int
+from std.ffi import ErrNo, external_call, c_int
+from std.math import isfinite
 from std.sys import argv, exit, num_logical_cores
 from std.time import perf_counter_ns
 
@@ -154,15 +155,89 @@ def command_known(command: String) -> Bool:
         return False
 
 
+def _equals_advice(a: Args, spec: CommandSpec) -> String:
+    """`--model=x` is an unknown flag; say how a value is given instead."""
+    var name = a.unknown[0]
+    var at = name.find("=")
+    if at < 0:
+        return String("")
+    var flag = String(name[byte=:at])
+    for v in spec.values:
+        if v == flag:
+            return (
+                "unknown flag --"
+                + name
+                + " for '"
+                + a.command
+                + "'\nflags take their value as the next argument: --"
+                + flag
+                + " "
+                + String(name[byte = at + 1 :])
+            )
+    return String("")
+
+
+def _number_problems(a: Args) raises -> String:
+    """The first numeric flag whose value can never be valid, or "".
+
+    Run before any model is mapped: `--steps abc` and `--threads 0` are
+    wrong whatever the model is.
+    """
+    for flag in ["max-tokens", "steps", "block-length", "threads", "seed"]:
+        if not a.has(flag):
+            continue
+        var raw = a.values[flag]
+        var n: Int
+        try:
+            n = Int(raw)
+        except:
+            return "flag --" + flag + " needs an integer, got '" + raw + "'"
+        if flag != "seed" and n < 1:
+            return "flag --" + flag + " must be at least 1, got " + raw
+    if a.has("temperature"):
+        var raw = a.values["temperature"]
+        var t = Float64(0)
+        var parsed = True
+        try:
+            t = Float64(raw)
+        except:
+            parsed = False
+        if not parsed or not isfinite(t):
+            return "flag --temperature needs a finite number, got '" + raw + "'"
+        if t < 0:
+            return "flag --temperature must be at least 0, got " + raw
+    for flag in ["tokens", "rows"]:
+        if not a.has(flag):
+            continue
+        var raw = a.values[flag]
+        try:
+            _ = parse_csv_ints(raw)
+        except:
+            return (
+                "flag --"
+                + flag
+                + " needs comma-separated integers, got '"
+                + raw
+                + "'"
+            )
+    return String("")
+
+
 def check_args(a: Args, spec: CommandSpec) raises -> String:
     """The usage error for the parsed arguments, or "" when they are valid."""
-    if len(a.unknown) > 0:
-        return unknown_flag_error(a.command, a.unknown[0], spec.declared())
     var see = "\nsee: mojo-dllm " + a.command + " --help"
-    if len(a.positional) > 0 and not spec.takes_path:
+    if a.missing_value.byte_length() > 0:
+        return "flag --" + a.missing_value + " needs a value" + see
+    if len(a.unknown) > 0:
+        var advice = _equals_advice(a, spec)
+        if advice.byte_length() > 0:
+            return advice + see
+        return unknown_flag_error(a.command, a.unknown[0], spec.declared())
+    var extra = 1 if spec.takes_path else 0
+    if len(a.positional) > extra:
         return (
             "unexpected argument '"
-            + a.positional[0]
+            + a.positional[extra]
             + "' for '"
             + a.command
             + "'"
@@ -185,36 +260,24 @@ def check_args(a: Args, spec: CommandSpec) raises -> String:
             + "'\n"
             + usage_for(a.command)
         )
+    var number = _number_problems(a)
+    if number.byte_length() > 0:
+        return number + see
     return String("")
-
-
-def open_failure_reason(path: String) -> String:
-    """Why the operating system refuses to open `path`, in its own words."""
-    try:
-        with open(path, "r") as f:
-            _ = f.read_bytes(1)
-    except e:
-        var text = String(e)
-        var marker = "': "
-        var at = text.find(marker)
-        if at >= 0:
-            return String(text[byte = at + marker.byte_length() :])
-        return text
-    return String("the file opens but the runtime could not map it")
 
 
 def model_error(message: String) -> String:
     """Adds the next step to a model-file error. Other errors pass through."""
     var cannot_open = "cannot open file: "
     if message.startswith(cannot_open):
-        var path = String(message[byte = cannot_open.byte_length() :])
-        return (
-            "cannot open model file "
-            + path
-            + ": "
-            + open_failure_reason(path)
-            + "\nto download a model, run: ./mojo-dllm pull"
+        var shown = "cannot open model file " + String(
+            message[byte = cannot_open.byte_length() :]
         )
+        # The message ends in the reason, which never contains ": ", so the
+        # suffix test cannot be fooled by the path.
+        if message.endswith(": " + String(ErrNo.ENOENT)):
+            return shown + "\nto download a model, run: ./mojo-dllm pull"
+        return shown
     var bad_magic = "not a GGUF file (bad magic): "
     if message.startswith(bad_magic):
         var path = String(message[byte = bad_magic.byte_length() :])
@@ -651,26 +714,63 @@ def boolean_flags() -> List[String]:
     ]
 
 
-def main():
-    var raw = List[String]()
-    for s in argv():
-        raw.append(String(s))
+struct Decision(Movable):
+    """What the arguments call for, before anything is loaded or printed.
+
+    `code` is the exit status: 0 for help or a run to start, 2 for a usage
+    error (`is_error`, and `text` is the message). `proceed` means the
+    arguments are valid and the command should run.
+    """
+
+    var code: Int
+    var text: String
+    var is_error: Bool
+    var proceed: Bool
+
+    def __init__(
+        out self, code: Int, text: String, is_error: Bool, proceed: Bool
+    ):
+        self.code = code
+        self.text = text
+        self.is_error = is_error
+        self.proceed = proceed
+
+
+def decide(raw: List[String]) raises -> Decision:
+    """Help, usage errors and valid arguments, in that order of precedence."""
     var command = raw[1] if len(raw) > 1 else String("")
-    var parsing = True
+    if is_top_level_help(command):
+        return Decision(0, usage(), False, False)
+    if not command_known(command):
+        return Decision(
+            2,
+            "unknown command: " + command + "\nsee: mojo-dllm --help",
+            True,
+            False,
+        )
+    var spec = command_spec(command)
+    var a = Args(raw, spec.values, spec.booleans)
+    if a.has("help"):
+        return Decision(0, usage_for(command), False, False)
+    var problem = check_args(a, spec)
+    if problem.byte_length() > 0:
+        return Decision(2, problem, True, False)
+    return Decision(0, String(""), False, True)
+
+
+def execute(raw: List[String]) -> Int:
+    """Runs the command line and returns the exit status: 0, 1 or 2."""
     try:
-        if is_top_level_help(command):
-            print(usage())
-            return
+        var d = decide(raw)
+        if d.is_error:
+            print("ERROR:", d.text)
+            return d.code
+        if not d.proceed:
+            print(d.text)
+            return d.code
+        var command = raw[1]
         var spec = command_spec(command)
         var a = Args(raw, spec.values, spec.booleans)
-        parsing = False
-        if a.has("help"):
-            print(usage_for(command))
-            return
-        var problem = check_args(a, spec)
-        if problem.byte_length() > 0:
-            print("ERROR:", problem)
-            exit(2)
         if command == "run":
             cmd_run(a)
         elif command == "tokenize":
@@ -679,9 +779,16 @@ def main():
             cmd_inspect(a)
         else:
             cmd_logits(a)
+        return 0
     except e:
         print("ERROR:", model_error(String(e)))
-        if parsing and command_known(command):
-            print("see: mojo-dllm", command, "--help")
-            exit(2)
-        exit(1)
+        return 1
+
+
+def main():
+    var raw = List[String]()
+    for s in argv():
+        raw.append(String(s))
+    var code = execute(raw)
+    if code != 0:
+        exit(code)

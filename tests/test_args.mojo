@@ -20,9 +20,18 @@ def test_values_and_booleans() raises:
     assert_true(not a.has("absent"))
 
 
-def test_missing_value_names_flag() raises:
-    with assert_raises(contains="flag --prompt needs a value"):
-        _ = Args(["x", "run", "--prompt"], ["prompt"], [])
+def test_missing_value_is_recorded_not_raised() raises:
+    var a = Args(["x", "run", "--prompt"], ["prompt"], [])
+    assert_equal(a.missing_value, "prompt")
+    assert_true(not a.has("prompt"))
+    var ok = Args(["x", "run", "--prompt", "p"], ["prompt"], [])
+    assert_equal(ok.missing_value, "")
+
+
+def test_help_before_a_trailing_value_flag_is_still_seen() raises:
+    var a = Args(["x", "run", "--help", "--prompt"], ["prompt"], [])
+    assert_true(a.has("help"))
+    assert_equal(a.missing_value, "prompt")
 
 
 def test_missing_required_and_defaults() raises:
