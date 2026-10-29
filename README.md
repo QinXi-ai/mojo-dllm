@@ -207,7 +207,7 @@ The [plan](docs/plan.md) lists what the original
 Start with [CONTRIBUTING.md](CONTRIBUTING.md). The short version:
 
 ```bash
-pixi install
+uv sync --frozen
 scripts/ci-local.sh --install-hooks   # pre-commit: fast gates, pre-push: all of them
 scripts/ci-local.sh                   # what CI runs
 ```
@@ -218,5 +218,5 @@ Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 mojo-dllm builds with Modular's Mojo toolchain. The compiler and standard
 library sources are Apache-2.0 with LLVM exceptions; the prebuilt packages and
-runtime libraries that `pixi install` fetches ship under Modular's own terms,
+runtime libraries that `uv sync` fetches ship under Modular's own terms,
 summarized in NOTICE. LLaDA is by GSAI-ML and released under MIT.

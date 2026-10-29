@@ -10,7 +10,7 @@ correction is recorded here and the code follows the correction.
 | Spec says | Reality (verified) | Consequence |
 |---|---|---|
 | Q4_K_M support, optionally Q8_0/F16 | A Q4_K_M GGUF of LLaDA-8B holds Q4_K (incl. `token_embd`), **Q6_K** (`attn_v`/`ffn_down` in half the layers, `output`) and F32 norms | v0.1 needs F32 + Q4_K + Q6_K |
-| `mojoproject.toml` | `magic` is gone; pixi + `pixi.toml` | pin `mojo==1.1.0`, `max-core==26.6.0`, commit `pixi.lock` |
+| `mojoproject.toml` | `magic` is gone; Mojo installs from PyPI | pin `mojo==1.1.0`, `max-core==26.6.0` in `pyproject.toml`, commit `uv.lock` |
 | `mojo test` | removed; `TestSuite` + `mojo run`; an empty suite exits 0 | CI pins the test count |
 | llama.cpp as generation reference | its diffusion sampler skips CFG/alg_temp, noises one row, inverts entropy, samples at temp 0 | llama.cpp is the **logit** reference; token parity uses the LLaDA `generate.py` algorithm re-implemented over llama.cpp logits |
 | diffuse-cpp as drop-in comparison | own `diffuse` GGUF schema, no tokenizer, unverified parity | benchmarked with its own file, on token IDs |

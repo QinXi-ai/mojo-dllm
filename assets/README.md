@@ -15,7 +15,7 @@ denoising its canvas, in Mojo. Colours: plate `#0F1419`, ember `#FFB45A` to
 `wordmark.svg` and `social-preview.svg` are generated from the logo:
 
 ```bash
-python3 scripts/gen_brand.py
+uv run --no-project python scripts/gen_brand.py
 ```
 
 Rasterize with any headless Chromium (Brave shown). The logo SVG declares
