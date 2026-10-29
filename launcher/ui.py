@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TextIO
 
-_CODES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33"}
+_CODES = {"bold": "1", "red": "31", "green": "32", "yellow": "33"}
 
 
 @dataclass(frozen=True)
@@ -26,9 +26,6 @@ class Style:
 
     def bold(self, text: str) -> str:
         return self.paint("bold", text)
-
-    def dim(self, text: str) -> str:
-        return self.paint("dim", text)
 
 
 def human_size(n: int) -> str:

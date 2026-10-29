@@ -49,3 +49,13 @@ def test_the_newest_revision_wins(tmp_path: Path) -> None:
     _snapshot(tmp_path, "o/r", "old", "m.gguf", 10)
     new = _snapshot(tmp_path, "o/r", "new", "m.gguf", 20)
     assert Hub(tmp_path).cached_path("o/r", "m.gguf") == new
+
+
+def test_every_file_the_offline_listing_names_is_in_the_cache(tmp_path: Path) -> None:
+    # plan_model picks from this listing, so an offline plan always has a cached file.
+    _snapshot(tmp_path, "o/r", "rev1", "m.Q4_K_M.gguf", 10)
+    _snapshot(tmp_path, "o/r", "rev2", "m.Q8_0.gguf", 20)
+    _snapshot(tmp_path, "o/r", "rev2", "m.Q2_K.gguf", 20)
+    hub = Hub(tmp_path, offline=True)
+    listed = hub.list_files("o/r")
+    assert listed and all(hub.cached_path("o/r", name) is not None for name in listed)

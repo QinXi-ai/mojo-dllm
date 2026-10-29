@@ -30,10 +30,6 @@ def is_stale(binary_mtime: float | None, source_mtimes: Iterable[float]) -> bool
     return any(m > binary_mtime for m in source_mtimes)
 
 
-def last_lines(text: str, n: int) -> str:
-    return "\n".join(text.splitlines()[-n:])
-
-
 def exec_binary(argv: list[str]) -> None:
     """Replace this process with the binary; a missing or unrunnable one is a launcher error."""
     try:

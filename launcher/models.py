@@ -149,11 +149,6 @@ def ensure_model(text: str, hub: Hub | None, out: TextIO, *, announce_cached: bo
         if announce_cached:
             print(f"already downloaded\n{plan.cached}", file=out)
         return plan.cached
-    if hub.offline:
-        raise LauncherError(
-            f"{plan.label} is not in the local cache ({hub.cache_dir}), and offline mode is on.\n"
-            f"On a connected machine run ./mojo-dllm pull {text}, or run again without --offline."
-        )
     path = fetch_model(plan, hub, out)
     if announce_cached:
         print(f"{path} ({human_size(path.stat().st_size)})", file=out)
