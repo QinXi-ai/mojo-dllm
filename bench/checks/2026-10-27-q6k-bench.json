@@ -1,0 +1,167 @@
+{
+  "date": "2026-10-27",
+  "model": "LLaDA-8B-Instruct.Q4_K_M.gguf",
+  "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU, 595.99.02",
+  "seq_len": 148,
+  "steps": 4,
+  "forward_passes": 4,
+  "method": "scripts/gpu_profile.py (nsys --trace=cuda), three interleaved rounds, base = perf-gemm4(27ddefd)",
+  "versions": {
+    "base": [
+      "27ddefd"
+    ],
+    "new": [
+      "c1f89fc"
+    ]
+  },
+  "kernel_ms_per_forward": {
+    "base": [
+      159.21,
+      160.814,
+      161.434
+    ],
+    "new": [
+      145.44,
+      145.155,
+      146.898
+    ]
+  },
+  "kernel_ms_per_forward_median": {
+    "base": 160.814,
+    "new": 145.44
+  },
+  "kernel_ms_per_forward_change_ms": -15.374,
+  "kernel_median_ms_per_forward": {
+    "base": [
+      134.36,
+      134.722,
+      134.752
+    ],
+    "new": [
+      125.243,
+      125.339,
+      125.447
+    ]
+  },
+  "kernel_median_ms_per_forward_median": {
+    "base": 134.722,
+    "new": 125.339
+  },
+  "kernel_median_ms_per_forward_change_ms": -9.383,
+  "forward_ms_measured": {
+    "base": [
+      164.77770325,
+      166.142975,
+      166.92055975
+    ],
+    "new": [
+      151.04662375,
+      150.54627575,
+      152.70305375
+    ]
+  },
+  "forward_ms_measured_median": {
+    "base": 166.143,
+    "new": 151.047
+  },
+  "forward_ms_measured_change_ms": -15.096,
+  "ms_per_step_measured": {
+    "base": [
+      180.394533,
+      181.28650599999997,
+      182.6587665
+    ],
+    "new": [
+      165.61209399999998,
+      166.33084325,
+      168.9171935
+    ]
+  },
+  "ms_per_step_measured_median": {
+    "base": 181.287,
+    "new": 166.331
+  },
+  "ms_per_step_measured_change_ms": -14.956,
+  "groups_ms_per_forward_median": {
+    "add": {
+      "base": 2.773,
+      "new": 2.799
+    },
+    "attention": {
+      "base": 8.524,
+      "new": 8.54
+    },
+    "copy_rows": {
+      "base": 0.015,
+      "new": 0.015
+    },
+    "gemm_q4k": {
+      "base": 91.577,
+      "new": 93.281
+    },
+    "gemm_q6k": {
+      "base": 44.526,
+      "new": 27.307
+    },
+    "quantize": {
+      "base": 4.62,
+      "new": 4.666
+    },
+    "rmsnorm": {
+      "base": 2.486,
+      "new": 2.521
+    },
+    "rope": {
+      "base": 2.023,
+      "new": 2.042
+    },
+    "silu_mul": {
+      "base": 4.27,
+      "new": 4.28
+    }
+  },
+  "groups_launches_per_forward_median": {
+    "add": {
+      "base": 64.0,
+      "new": 64.0
+    },
+    "attention": {
+      "base": 32.0,
+      "new": 32.0
+    },
+    "copy_rows": {
+      "base": 2.0,
+      "new": 2.0
+    },
+    "gemm_q4k": {
+      "base": 192.0,
+      "new": 192.0
+    },
+    "gemm_q6k": {
+      "base": 33.0,
+      "new": 33.0
+    },
+    "quantize": {
+      "base": 129.0,
+      "new": 129.0
+    },
+    "rmsnorm": {
+      "base": 65.0,
+      "new": 65.0
+    },
+    "rope": {
+      "base": 64.0,
+      "new": 64.0
+    },
+    "silu_mul": {
+      "base": 32.0,
+      "new": 32.0
+    }
+  },
+  "definitions": {
+    "kernel_ms_per_forward": "sum of every kernel instance's device time, per forward pass",
+    "kernel_median_ms_per_forward": "for each kernel, its median instance time times its launches, summed, per forward pass",
+    "forward_ms_measured": "the model's own timer around one forward pass, per pass (tm.total_ns / forward passes)",
+    "ms_per_step_measured": "generate seconds over forward passes"
+  }
+}

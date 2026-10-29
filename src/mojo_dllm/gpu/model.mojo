@@ -18,22 +18,30 @@ from mojo_dllm.formats.gguf import GGUFFile, TensorInfo
 from mojo_dllm.gpu.kernels import (
     GpuQActs,
     add_bias_gpu,
-    add_gpu,
     attention_gpu,
     copy_rows_gpu,
     dev_f32,
+    dev_f64,
     dev_i32,
     dev_u8,
     gemm_gpu,
     quantize_gpu,
-    rmsnorm_gpu,
+    rmsnorm_quantize_gpu,
+    add_rmsnorm_quantize_gpu,
+    silu_mul_quantize_gpu,
     rope_gpu,
-    silu_mul_gpu,
+    row_stats_gpu,
+    RS_FIELDS,
     stage_matrix,
     staged_matrix_bytes,
 )
 from mojo_dllm.kernels.ops import rope_table
-from mojo_dllm.models.transformer import DenoisingModel, ModelConfig, Timings
+from mojo_dllm.models.transformer import (
+    DenoisingModel,
+    ModelConfig,
+    RowStats,
+    Timings,
+)
 from mojo_dllm.quant.kquants import (
     dequant_row,
     check_matrix_type,
@@ -154,10 +162,14 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
     var rc: DeviceBuffer[DType.float32]
     var rs: DeviceBuffer[DType.float32]
     var rows_idx: DeviceBuffer[DType.int32]
+    var stat_tok: DeviceBuffer[DType.int32]
+    var stat_val: DeviceBuffer[DType.float64]
     var qa_h: GpuQActs
     var qa_f: GpuQActs
     var host_x: Floats
     var host_idx: Bytes
+    var host_stat_tok: Bytes
+    var host_stat_val: Bytes
 
     def __init__(out self, path: String, max_tokens: Int) raises:
         var t0 = perf_counter_ns()
@@ -286,10 +298,16 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
         self.ctx.enqueue_copy(self.rc, hc.ptr())
         self.ctx.enqueue_copy(self.rs, hs.ptr())
         self.rows_idx = self.ctx.enqueue_create_buffer[DType.int32](L)
+        self.stat_tok = self.ctx.enqueue_create_buffer[DType.int32](L)
+        self.stat_val = self.ctx.enqueue_create_buffer[DType.float64](
+            RS_FIELDS * L
+        )
         self.qa_h = GpuQActs(self.ctx, L, c.hidden)
         self.qa_f = GpuQActs(self.ctx, L, c.ffn)
         self.host_x = Floats(L * c.hidden)
         self.host_idx = Bytes(4 * L)
+        self.host_stat_tok = Bytes(4 * L)
+        self.host_stat_val = Bytes(8 * RS_FIELDS * L)
         self.timings = Timings()
         self.load_seconds = 0
         # Synchronizing around each kernel group costs a little, so timing
@@ -399,6 +417,67 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
     def forward(
         mut self, tokens: List[Int], out_rows: List[Int], logits: F32Ptr
     ) raises:
+        var t_start = self._forward_logits(tokens, out_rows)
+        self.ctx.enqueue_copy(
+            logits,
+            self.logits.create_sub_buffer[DType.float32](
+                0, len(out_rows) * self.cfg.vocab
+            ),
+        )
+        self.ctx.synchronize()
+        self.timings.forwards += 1
+        self.timings.total_ns += Int(perf_counter_ns() - t_start)
+
+    def device_row_stats(self) -> Bool:
+        return True
+
+    def forward_stats(
+        mut self, tokens: List[Int], out_rows: List[Int], mut out: RowStats
+    ) raises:
+        """`forward`, then the row reductions on the device: only the token and
+        four numbers per row cross the bus."""
+        var t_start = self._forward_logits(tokens, out_rows)
+        var n_out = len(out_rows)
+        row_stats_gpu(
+            self.ctx,
+            dev_f32(self.logits),
+            n_out,
+            self.cfg.vocab,
+            dev_i32(self.stat_tok),
+            dev_f64(self.stat_val),
+        )
+        self.ctx.enqueue_copy(
+            self.host_stat_tok.i32(),
+            self.stat_tok.create_sub_buffer[DType.int32](0, n_out),
+        )
+        self.ctx.enqueue_copy(
+            self.host_stat_val.f64(),
+            self.stat_val.create_sub_buffer[DType.float64](
+                0, RS_FIELDS * n_out
+            ),
+        )
+        self.ctx.synchronize()
+        var tp = self.host_stat_tok.i32()
+        var sp = self.host_stat_val.f64()
+        out.tok.clear()
+        out.mx.clear()
+        out.z.clear()
+        out.second.clear()
+        out.weighted.clear()
+        for j in range(n_out):
+            out.tok.append(Int(tp[unsafe_offset=j]))
+            out.mx.append(sp[unsafe_offset=RS_FIELDS * j])
+            out.z.append(sp[unsafe_offset=RS_FIELDS * j + 1])
+            out.second.append(sp[unsafe_offset=RS_FIELDS * j + 2])
+            out.weighted.append(sp[unsafe_offset=RS_FIELDS * j + 3])
+        self.timings.forwards += 1
+        self.timings.total_ns += Int(perf_counter_ns() - t_start)
+
+    def _forward_logits(
+        mut self, tokens: List[Int], out_rows: List[Int]
+    ) raises -> Int:
+        """Run the network up to the LM head; the logits stay in self.logits
+        (not synchronized). Returns the start time in ns."""
         var c = self.cfg
         var L = len(tokens)
         var n_out = len(out_rows)
@@ -460,8 +539,11 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
         var rows = L
         for li in range(c.n_layers):
             var ly = self.layers[li]
-            rmsnorm_gpu(ctx, x, self._f32(ly.attn_norm), xn, rows, d, c.eps)
-            quantize_gpu(ctx, xn, rows, d, self.qa_h)
+            if li == 0:
+                # Later layers start from the previous layer's fused tail.
+                rmsnorm_quantize_gpu(
+                    ctx, x, self._f32(ly.attn_norm), self.qa_h, rows, d, c.eps
+                )
             self.timings.gemm_ns += self._gemm(ly.wq, self.qa_h, rows, q, d)
             self.timings.gemm_ns += self._gemm(ly.wk, self.qa_h, rows, k, kvd)
             self.timings.gemm_ns += self._gemm(ly.wv, self.qa_h, rows, v, kvd)
@@ -510,26 +592,23 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
                     self.att.create_sub_buffer[DType.float32](0, n_out * d),
                 )
                 rows = n_out
-            add_gpu(ctx, x, h, rows * d)
-            rmsnorm_gpu(ctx, x, self._f32(ly.ffn_norm), xn, rows, d, c.eps)
-            quantize_gpu(ctx, xn, rows, d, self.qa_h)
+            add_rmsnorm_quantize_gpu(
+                ctx, x, h, self._f32(ly.ffn_norm), self.qa_h, rows, d, c.eps
+            )
             self.timings.gemm_ns += self._gemm(ly.wg, self.qa_h, rows, g, c.ffn)
             self.timings.gemm_ns += self._gemm(ly.wu, self.qa_h, rows, u, c.ffn)
-            silu_mul_gpu(ctx, g, u, rows * c.ffn)
-            quantize_gpu(ctx, g, rows, c.ffn, self.qa_f)
+            silu_mul_quantize_gpu(ctx, g, u, self.qa_f, rows, c.ffn)
             self.timings.gemm_ns += self._gemm(ly.wd, self.qa_f, rows, h, d)
-            add_gpu(ctx, x, h, rows * d)
+            # Residual add, then the next layer's attention norm (or the
+            # output norm after the last layer), quantized for its GEMMs.
+            var next_norm = self.out_norm
+            if li + 1 < c.n_layers:
+                next_norm = self.layers[li + 1].attn_norm
+            add_rmsnorm_quantize_gpu(
+                ctx, x, h, self._f32(next_norm), self.qa_h, rows, d, c.eps
+            )
 
-        rmsnorm_gpu(ctx, x, self._f32(self.out_norm), xn, n_out, d, c.eps)
-        quantize_gpu(ctx, xn, n_out, d, self.qa_h)
         self.timings.head_ns += self._gemm(
             self.output, self.qa_h, n_out, dev_f32(self.logits), c.vocab
         )
-        ctx.enqueue_copy(
-            logits,
-            self.logits.create_sub_buffer[DType.float32](0, n_out * c.vocab),
-        )
-        ctx.synchronize()
-        var t_end = perf_counter_ns()
-        self.timings.forwards += 1
-        self.timings.total_ns += Int(t_end - t_start)
+        return Int(t_start)
