@@ -17,8 +17,15 @@ dependencies = [
 fixtures = ["numpy==2.3.3", "gguf==0.19.0"]
 # The lint tools CI runs, at the versions it runs them.
 lint = ["yamllint==1.38.0", "PyYAML==6.0.2"]
+# tests/python, the ./mojo-dllm launcher tests.
+test = ["pytest==9.1.1"]
 
 [tool.uv]
 # `uv sync` installs the toolchain only; a group is opted into with --group.
 default-groups = []
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+# The launcher package sits at the repo root and is not installed.
+pythonpath = ["."]
