@@ -8,7 +8,9 @@ value comes from llama.cpp's own `gguf` package (its K-quant dequantizers) or
 from a plain numpy forward pass over those dequantized weights, so the Mojo
 code is checked against the reference implementation and not against itself.
 
-Outputs (deterministic, seed 1234):
+Outputs (deterministic, seed 1234 unless noted):
+  tests/fixtures/dequant-types.gguf Q8_0 / Q5_K / BF16 references, separate seed 340034
+  tests/fixtures/unsupported-embedding.gguf minimal IQ2_XXS embedding, no RNG
   tests/fixtures/kquants.gguf      Q4_K / Q6_K / F16 tensors + their f32 dequantization
   tests/fixtures/bad-magic.gguf    a file whose magic is wrong
   tests/fixtures/tiny-llada.gguf   2-layer LLaDA-shaped model, hidden 256, vocab 512
@@ -23,7 +25,7 @@ import pathlib
 import numpy as np
 from gguf import GGMLQuantizationType as Q
 from gguf import GGUFReader, GGUFWriter
-from gguf.quants import dequantize
+from gguf.quants import dequantize, quantize
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "tests" / "fixtures"
@@ -328,11 +330,11 @@ def malformed() -> None:
     def part_offset(field, index: int) -> int:
         return int(field.offset + sum(p.nbytes for p in field.parts[:index]))
 
-    def patch(name: str, offset: int, width: int, value: int) -> None:
+    def patch(name: str, offset: int, width: int, value: int, old: int) -> None:
         data = bytearray(base)
         assert 0 <= offset <= len(data) - width
+        assert int.from_bytes(data[offset:offset + width], "little") == old
         data[offset:offset + width] = value.to_bytes(width, "little")
-        assert int.from_bytes(data[offset:offset + width], "little") == value
         assert data[:offset] == base[:offset]
         assert data[offset + width:] == base[offset + width:]
         (out / (name + ".gguf")).write_bytes(data)
@@ -341,29 +343,134 @@ def malformed() -> None:
                       ("header-20", 20), ("metadata-cut", 60)):
         (out / (name + ".gguf")).write_bytes(base[:cut])
     for version in (1, 4):
-        patch(f"version-{version}", 4, 4, version)
+        patch(f"version-{version}", 4, 4, version, 3)
     for name, offset in (("tensors", 8), ("kv", 16)):
         for label, value in (("large", 1 << 21), ("negative", (1 << 64) - 1)):
-            patch(f"{name}-{label}", offset, 8, value)
+            patch(f"{name}-{label}", offset, 8, value, 2)
     scalar = reader.fields["general.architecture"]
     array = reader.fields["test.array"]
     assert int(scalar.parts[2][0]) == 8  # GGUF string
     assert int(array.parts[2][0]) == 9  # GGUF array
     assert int(array.parts[3][0]) == 5  # int32 elements
-    patch("key-length", int(scalar.offset), 8, 1 << 20)
-    patch("scalar-type", part_offset(scalar, 2), 4, 99)
-    patch("array-type", part_offset(array, 3), 4, 99)
-    patch("nested-array", part_offset(array, 3), 4, 9)
+    patch("key-length", int(scalar.offset), 8, 1 << 20, len("general.architecture"))
+    patch("key-length-negative", int(scalar.offset), 8, 1 << 63, len("general.architecture"))
+    patch("scalar-type", part_offset(scalar, 2), 4, 99, 8)
+    patch("array-type", part_offset(array, 3), 4, 99, 5)
+    patch("nested-array", part_offset(array, 3), 4, 9, 5)
+    patch("array-count-wrapped", part_offset(array, 4), 8, (1 << 62) + 2, 3)
+
+    for label, alignment in (("zero", 0), ("nonpower", 24), ("valid", 64),
+                             ("type", 32), ("array", 32)):
+        w = GGUFWriter(str(out / f"alignment-{label}.gguf"), "test")
+        if label == "type":
+            w.add_uint8("general.alignment", alignment)
+        elif label == "array":
+            w.add_array("general.alignment", [alignment])
+        else:
+            w.add_uint32("general.alignment", alignment)
+        if label == "valid":
+            w.data_alignment = alignment
+        w.add_tensor("f32", np.arange(8, dtype=np.float32))
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+
+    strings_path = out / "string-array.gguf"
+    w = GGUFWriter(str(strings_path), "test")
+    w.add_array("test.strings", ["a", "b"])
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    strings = strings_path.read_bytes()
+    string_field = GGUFReader(str(strings_path)).fields["test.strings"]
+    count_offset = part_offset(string_field, 4)
+    assert int.from_bytes(strings[count_offset:count_offset + 8], "little") == 2
+    for label, count in (("negative", (1 << 64) - 1), ("large", 1 << 62)):
+        data = bytearray(strings)
+        data[count_offset:count_offset + 8] = count.to_bytes(8, "little")
+        (out / f"string-count-{label}.gguf").write_bytes(data)
     tensor = reader.tensors[0]
     assert tensor.name == "f32"
     assert int(tensor.field.parts[2][0]) == 1
     for dims in (0, 5):
-        patch(f"dims-{dims}", part_offset(tensor.field, 2), 4, dims)
+        patch(f"dims-{dims}", part_offset(tensor.field, 2), 4, dims, 1)
     last = reader.tensors[-1]
     assert last.name == "q4k"
     cut = int(last.data_offset + last.n_bytes - 1)
     assert cut > reader.data_offset and cut < len(base)
     (out / "tensor-cut.gguf").write_bytes(base[:cut])
+    # Valid empty directory: the last uint64 read ends exactly at EOF, no padding.
+    (out / "exact-eof.gguf").write_bytes(b"GGUF" + (3).to_bytes(4, "little") + bytes(16))
+
+
+def dequant_types() -> None:
+    """Reference-only types, independent of the existing fixture RNG stream."""
+    rng = np.random.default_rng(340034)
+    w = GGUFWriter(str(OUT / "dequant-types.gguf"), "test")
+    q8 = quantize(rng.standard_normal((4, 96)).astype(np.float32), Q.Q8_0)
+    bf16 = quantize(rng.standard_normal((3, 40)).astype(np.float32), Q.BF16)
+    q5 = rng.integers(0, 256, (8, 176), dtype=np.uint8)
+    q5[:, :2] = f16_bytes(rng.uniform(0.002, 0.01, 8)).reshape(8, 2)
+    q5[:, 2:4] = f16_bytes(rng.uniform(0.002, 0.01, 8)).reshape(8, 2)
+    q5 = q5.reshape(4, 352)
+    for name, data, kind in (("q8_0", q8, Q.Q8_0), ("bf16", bf16, Q.BF16),
+                             ("q5k", q5, Q.Q5_K)):
+        w.add_tensor(name, data, raw_shape=data.shape, raw_dtype=kind)
+        w.add_tensor(name + ".expected", dequantize(data, kind).astype(np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
+def metadata_cases() -> None:
+    """Metadata-only ModelConfig inputs; no model weights or random draws."""
+    out = OUT / "metadata"
+    out.mkdir(parents=True, exist_ok=True)
+    required = {
+        "llada.block_count": 2,
+        "llada.embedding_length": 512,
+        "llada.attention.head_count": 4,
+        "llada.feed_forward_length": 1024,
+        "llada.attention.layer_norm_rms_epsilon": 1e-5,
+        "tokenizer.ggml.mask_token_id": 511,
+    }
+
+    def write(name: str, updates=None, omit=None) -> None:
+        fields = {**required, "llada.vocab_size": 512, **(updates or {})}
+        if omit:
+            del fields[omit]
+        w = GGUFWriter(str(out / (name + ".gguf")), "llada")
+        for key, value in fields.items():
+            if isinstance(value, str):
+                w.add_string(key, value)
+            elif isinstance(value, float):
+                w.add_float32(key, value)
+            else:
+                w.add_uint32(key, value)
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+
+    for key in required:
+        write("missing-" + key, omit=key)
+    write("kv-heads", {"llada.attention.head_count_kv": 3})
+    write("hidden-size", {"llada.embedding_length": 513})
+    write("rope-width", {"llada.rope.dimension_count": 64})
+    write("key-length", {"llada.attention.key_length": 64})
+    write("rope-type", {"llada.rope.scaling.type": "yarn"})
+    write("rope-factor", {"llada.rope.scaling.factor": 4.0})
+    write("rope-width-type", {"llada.rope.dimension_count": "128"})
+    write("rope-factor-type", {"llada.rope.scaling.factor": "1.0"})
+    write("defaults")
+    for kind in ("none", "linear"):
+        write("compatible-" + kind, {"llada.rope.dimension_count": 128,
+                                    "llada.attention.key_length": 128,
+                                    "llada.rope.scaling.type": kind,
+                                    "llada.rope.scaling.factor": 1.0})
 
 
 def main() -> None:
@@ -372,8 +479,28 @@ def main() -> None:
     tiny_llada()
     tiny_dream()
     malformed()
+    dequant_types()
+    unsupported_embedding()
+    metadata_cases()
     for p in sorted(OUT.iterdir()):
         print(f"{p.stat().st_size:>9}  {p.relative_to(ROOT)}")
+
+
+def unsupported_embedding() -> None:
+    """Minimal model directory: construction must reject the embedding first."""
+    w = GGUFWriter(str(OUT / "unsupported-embedding.gguf"), "llada")
+    for key, value in {"block_count": 1, "embedding_length": 256,
+                       "attention.head_count": 2, "feed_forward_length": 256,
+                       "vocab_size": 1}.items():
+        w.add_uint32("llada." + key, value)
+    w.add_float32("llada.attention.layer_norm_rms_epsilon", 1e-5)
+    w.add_uint32("tokenizer.ggml.mask_token_id", 0)
+    data = np.zeros((1, 66), dtype=np.uint8)
+    w.add_tensor("token_embd.weight", data, raw_shape=data.shape, raw_dtype=Q.IQ2_XXS)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
 
 
 if __name__ == "__main__":

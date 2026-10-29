@@ -45,8 +45,10 @@ live in `tests/fixtures/` and come from scripts, never from hand:
 | Fixture | Made by | Checks |
 |---|---|---|
 | `kquants.gguf`, `tiny-llada.gguf`, `tiny-llada.expected.f32` | `scripts/gen_fixtures.py` | GGUF parsing, decoders, the forward pass against a numpy reference |
+| `dequant-types.gguf`, `unsupported-embedding.gguf` | `scripts/gen_fixtures.py` | Q8_0/Q5_K/BF16 references (seed 340034) and embedding rejection before CPU/GPU allocation (no RNG) |
 | `llada-tokenizer.gguf`, `tokenizer-golden.tsv` | `scripts/gen_tokenizer_fixture.py` | tokenizer ids against `llama-tokenize` |
 | `src/mojo_dllm/tokenizer/unicode_tables.mojo` | `scripts/gen_unicode_tables.py` | code point classes from llama.cpp's own tables |
+| GGUF/source tensor shape report | `scripts/check_weights.py` (`--self-test`) | LLaDA and Dream name mapping and safetensors header shapes; run with `uv run --with gguf==0.19.0 --with numpy==2.3.3` |
 
 `tests/gpu/test_gpu.mojo` holds the GPU tests: each kernel against the CPU
 function it replaces, and the GPU forward pass on both tiny models against the

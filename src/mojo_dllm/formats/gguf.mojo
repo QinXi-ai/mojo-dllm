@@ -32,6 +32,7 @@ comptime GGML_F32 = 0
 comptime GGML_F16 = 1
 comptime GGML_Q8_0 = 8
 comptime GGML_Q4_K = 12
+comptime GGML_Q5_K = 13
 comptime GGML_Q6_K = 14
 comptime GGML_BF16 = 30
 
@@ -102,6 +103,8 @@ def ggml_row_bytes(t: Int, n: Int) raises -> Int:
         return n // 32 * 34
     if t == GGML_Q4_K:
         return n // 256 * 144
+    if t == GGML_Q5_K:
+        return n // 256 * 176
     if t == GGML_Q6_K:
         return n // 256 * 210
     raise Error("unsupported GGUF tensor type: " + ggml_type_name(t))
@@ -117,7 +120,7 @@ def _tensor_bytes(t: Int, ne0: Int, rows: Int) -> Int:
 def ggml_block_size(t: Int) -> Int:
     if t == GGML_Q8_0:
         return 32
-    if t == GGML_Q4_K or t == GGML_Q6_K:
+    if t == GGML_Q4_K or t == GGML_Q5_K or t == GGML_Q6_K:
         return 256
     return 1
 
@@ -302,17 +305,34 @@ struct GGUFFile(Movable):
         for _ in range(n_kv):
             var key = r.string()
             var kind = Int(r.u32())
+            if key == "general.alignment" and kind != GGUF_TYPE_UINT32:
+                raise Error(
+                    key + " has type " + String(kind) + ", expected UINT32"
+                )
             if kind == GGUF_TYPE_ARRAY:
                 var ek = Int(r.u32())
-                var count = Int(r.u64())
+                var raw_count = r.u64()
+                var count = Int(raw_count)
                 var at = r.at
+                var count_error = (
+                    key + " has invalid array count " + String(raw_count)
+                )
+                if count < 0:
+                    raise Error(count_error)
                 if ek == GGUF_TYPE_STRING:
+                    # Even an empty string needs its uint64 length prefix.
+                    if count > (self.map.size - r.at) // 8:
+                        raise Error(count_error)
                     for _ in range(count):
                         r.skip_string()
                 elif ek == GGUF_TYPE_ARRAY:
                     raise Error("nested GGUF arrays are not supported: " + key)
                 else:
-                    r.skip(count * _scalar_size(ek))
+                    var element_size = _scalar_size(ek)
+                    # Divide first: multiplying an untrusted count can wrap.
+                    if count > (self.map.size - r.at) // element_size:
+                        raise Error(count_error)
+                    r.skip(count * element_size)
                 self.kvs.append(KV(key, kind, at, ek, count))
             else:
                 var at = r.at
@@ -324,6 +344,16 @@ struct GGUFFile(Movable):
                 if key == "general.alignment":
                     var rr = Reader(self.map.addr, self.map.size, at)
                     self.alignment = Int(rr.u32())
+                    if (
+                        self.alignment == 0
+                        or (self.alignment & (self.alignment - 1)) != 0
+                    ):
+                        raise Error(
+                            key
+                            + " has invalid value "
+                            + String(self.alignment)
+                            + "; expected a non-zero power of two"
+                        )
 
         var rel = List[Int]()
         for _ in range(n_tensors):
@@ -390,7 +420,10 @@ struct GGUFFile(Movable):
 
     def get_int(self, key: String) raises -> Int:
         var kv = self._kv(key)
-        return self._read_scalar_int(kv.kind, kv.at)
+        try:
+            return self._read_scalar_int(kv.kind, kv.at)
+        except e:
+            raise Error("metadata key " + key + ": " + String(e))
 
     def get_int_or(self, key: String, default: Int) raises -> Int:
         if not self.has_key(key):
@@ -404,7 +437,10 @@ struct GGUFFile(Movable):
             return bitcast[DType.float32](UInt32(r.u32()))
         if kv.kind == GGUF_TYPE_FLOAT64:
             return Float32(bitcast[DType.float64](r.u64()))
-        return Float32(self._read_scalar_int(kv.kind, kv.at))
+        try:
+            return Float32(self._read_scalar_int(kv.kind, kv.at))
+        except e:
+            raise Error("metadata key " + key + ": " + String(e))
 
     def get_f32_or(self, key: String, default: Float32) raises -> Float32:
         if not self.has_key(key):
