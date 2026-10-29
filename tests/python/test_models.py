@@ -166,3 +166,34 @@ def test_offline_selection_uses_the_cached_listing_only(hub, tmp_path: Path) -> 
     with pytest.raises(LauncherError, match="Q4_K_M"):
         ensure_model("a/b:Q4_K_M", hub, io.StringIO(), announce_cached=False)
     assert hub.downloads == []
+
+
+@pytest.mark.parametrize(
+    ("quant", "files"),
+    [
+        ("Q4_K", ["m-Q4_K_S.gguf"]),
+        ("Q2_K", ["m-Q2_K_L.gguf"]),
+        ("Q4_K", ["m.Q4_K_M.gguf", "m.Q4_K_S.gguf"]),
+    ],
+)
+def test_a_quant_is_not_a_prefix_of_a_longer_quant(quant: str, files: list[str]) -> None:
+    with pytest.raises(LauncherError, match="no GGUF file matches quant"):
+        pick_gguf(files, quant)
+
+
+@pytest.mark.parametrize("name", ["model.Q4_K_M.gguf", "Model-Q4_K_M-something.gguf", "m_Q4_K_M.gguf"])
+def test_a_quant_still_matches_between_separators(name: str) -> None:
+    assert pick_gguf([name], "Q4_K_M") == name
+
+
+def test_a_multimodal_projector_is_never_the_model() -> None:
+    assert pick_gguf(["mmproj-F16.gguf", "m-Q3_K_M.gguf"], None) == "m-Q3_K_M.gguf"
+    assert pick_gguf(["MMPROJ-model-f16.gguf", "m-Q3_K_M.gguf"], None) == "m-Q3_K_M.gguf"
+    with pytest.raises(LauncherError, match="no .gguf"):
+        pick_gguf(["mmproj-F16.gguf"], None)
+
+
+@pytest.mark.parametrize("text", ["..", "a/..", "./x", "../x", "a/.", ".a/b", "a/.b", "-a/b", "a/-b", "a/b/.."])
+def test_repo_components_cannot_be_dots_or_dashes(text: str) -> None:
+    with pytest.raises(LauncherError, match="unknown model"):
+        parse_model_ref(text)

@@ -17,7 +17,8 @@ ALIASES = {"llada-8b": ("mradermacher/LLaDA-8B-Instruct-GGUF", "Q4_K_M")}
 # llama.cpp's order when no quant is requested; the first file is the last resort.
 DEFAULT_QUANTS = ("Q4_K_M", "Q8_0")
 
-_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(:[A-Za-z0-9._-]+)?$")
+# Owner and name never start with "." or "-", so "..", "./x" and "-x/y" are not repos.
+_REPO = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*/[A-Za-z0-9_][A-Za-z0-9._-]*(:[A-Za-z0-9._-]+)?$")
 _SHARD = re.compile(r"-\d{5}-of-\d{5}")
 
 
@@ -69,11 +70,15 @@ def parse_model_ref(text: str) -> ModelRef:
 
 
 def _has_quant(name: str, quant: str) -> bool:
-    return re.search(rf"(?<![A-Za-z0-9]){re.escape(quant)}(?![A-Za-z0-9])", name, re.I) is not None
+    # "_" may precede a quant (m_Q5_K_M) but not follow it: Q4_K is not Q4_K_S.
+    return re.search(rf"(?<![A-Za-z0-9]){re.escape(quant)}(?![A-Za-z0-9_])", name, re.I) is not None
 
 
 def pick_gguf(files: Sequence[str], quant: str | None) -> str:
-    ggufs = [f for f in files if f.endswith(".gguf") and not _SHARD.search(f)]
+    ggufs = [
+        f for f in files
+        if f.endswith(".gguf") and not _SHARD.search(f) and not f.rsplit("/", 1)[-1].lower().startswith("mmproj")
+    ]
     if not ggufs:
         raise LauncherError("the repo has no .gguf file (split shards are not supported)")
     wanted = (quant,) if quant else DEFAULT_QUANTS
