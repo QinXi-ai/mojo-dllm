@@ -45,9 +45,10 @@ struct Mapping(Movable):
         var fd = external_call["open", c_int, num_fixed_args=2](
             cpath.as_c_string_span(), c_int(O_RDONLY), c_int(0)
         )
+        var failure = get_errno()
         _ = cpath^
         if Int(fd) < 0:
-            raise Error("cannot open file: " + path)
+            raise Error("cannot open file: " + path + ": " + String(failure))
         # A directory opens read-only, then lseek and mmap answer differently
         # per filesystem. pread() fails with EISDIR on every one of them.
         var probe = Bytes(1)

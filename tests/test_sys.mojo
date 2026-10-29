@@ -61,11 +61,36 @@ def test_mapping_reads_bytes() raises:
         assert_equal(m.ptr().unsafe_load(i), expected[i])
 
 
-def test_mapping_missing_path_names_file() raises:
-    with assert_raises(
-        contains="cannot open file: tests/fixtures/does-not-exist.gguf"
-    ):
-        _ = Mapping("tests/fixtures/does-not-exist.gguf")
+def _open_error(path: String) -> String:
+    try:
+        _ = Mapping(path)
+    except e:
+        return String(e)
+    return String("opened")
+
+
+def test_mapping_missing_path_names_file_and_reason() raises:
+    assert_equal(
+        _open_error("tests/fixtures/does-not-exist.gguf"),
+        (
+            "cannot open file: tests/fixtures/does-not-exist.gguf: No such"
+            " file or directory"
+        ),
+    )
+
+
+def test_mapping_open_reason_survives_quotes_in_the_path() raises:
+    assert_equal(
+        _open_error("/nonexistent/x': y"),
+        "cannot open file: /nonexistent/x': y: No such file or directory",
+    )
+
+
+def test_mapping_reports_the_errno_of_the_failure() raises:
+    assert_equal(
+        _open_error("tests/fixtures/bad-magic.gguf/x"),
+        "cannot open file: tests/fixtures/bad-magic.gguf/x: Not a directory",
+    )
 
 
 def test_mapping_empty_file() raises:

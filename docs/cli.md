@@ -69,7 +69,9 @@ change nothing; every other error exits with status 1.
 | `ERROR: missing model path for 'inspect'` | `inspect` takes the path as an argument. The usage follows |
 | `ERROR: unexpected argument 'x' for 'run'` | `run`, `tokenize` and `logits` take flags only |
 | `ERROR: flag --prompt needs a value` | A value flag is the last argument |
-| `ERROR: cannot open model file PATH: No such file or directory` | The path is wrong or unreadable. The reason is the operating system's. The next line is `to download a model, run: ./mojo-dllm pull` |
+| `ERROR: cannot open model file PATH: No such file or directory` | The path is wrong. The reason is the operating system's. The next line is `to download a model, run: ./mojo-dllm pull` |
+| `ERROR: cannot open model file PATH: Permission denied` | The open failed for a reason other than a missing file, such as `Not a directory`. The operating system names the reason. No download hint follows, because `pull` would not fix it |
+| `ERROR: is a directory: PATH` | The model path names a directory |
 | `ERROR: PATH is not a GGUF file (bad magic).` | A failed download leaves an HTML error page with a `.gguf` name. Delete the file and run `./mojo-dllm pull` again |
 
 The remaining errors exit with status 1 and come from the model file itself:

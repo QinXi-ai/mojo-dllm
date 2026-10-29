@@ -10,7 +10,7 @@
     mojo-dllm logits   --model M --tokens 1,2,3 --rows 0,2 --out logits.f32 [--threads N] [--device cpu|gpu]
 """
 
-from std.ffi import external_call, c_int
+from std.ffi import ErrNo, external_call, c_int
 from std.sys import argv, exit, num_logical_cores
 from std.time import perf_counter_ns
 
@@ -188,33 +188,18 @@ def check_args(a: Args, spec: CommandSpec) raises -> String:
     return String("")
 
 
-def open_failure_reason(path: String) -> String:
-    """Why the operating system refuses to open `path`, in its own words."""
-    try:
-        with open(path, "r") as f:
-            _ = f.read_bytes(1)
-    except e:
-        var text = String(e)
-        var marker = "': "
-        var at = text.find(marker)
-        if at >= 0:
-            return String(text[byte = at + marker.byte_length() :])
-        return text
-    return String("the file opens but the runtime could not map it")
-
-
 def model_error(message: String) -> String:
     """Adds the next step to a model-file error. Other errors pass through."""
     var cannot_open = "cannot open file: "
     if message.startswith(cannot_open):
-        var path = String(message[byte = cannot_open.byte_length() :])
-        return (
-            "cannot open model file "
-            + path
-            + ": "
-            + open_failure_reason(path)
-            + "\nto download a model, run: ./mojo-dllm pull"
+        var shown = "cannot open model file " + String(
+            message[byte = cannot_open.byte_length() :]
         )
+        # The message ends in the reason, which never contains ": ", so the
+        # suffix test cannot be fooled by the path.
+        if message.endswith(": " + String(ErrNo.ENOENT)):
+            return shown + "\nto download a model, run: ./mojo-dllm pull"
+        return shown
     var bad_magic = "not a GGUF file (bad magic): "
     if message.startswith(bad_magic):
         var path = String(message[byte = bad_magic.byte_length() :])

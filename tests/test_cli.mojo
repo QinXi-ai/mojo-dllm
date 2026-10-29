@@ -3,6 +3,7 @@ from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 
 from cli.args import Args
 from mojo_dllm.formats.gguf import GGUFFile
+from mojo_dllm.sys.mmap import Mapping
 from main import (
     boolean_flags,
     chat_prompt,
@@ -12,7 +13,6 @@ from main import (
     _csv,
     is_top_level_help,
     model_error,
-    open_failure_reason,
     usage,
     usage_for,
 )
@@ -262,10 +262,18 @@ def test_help_routing() raises:
     assert_true(a.has("help"))
 
 
+def _mapping_error(path: String) -> String:
+    try:
+        _ = Mapping(path)
+    except e:
+        return model_error(String(e))
+    return String("opened")
+
+
 def test_missing_model_file_hint() raises:
     var path = "/nonexistent/model.gguf"
     assert_equal(
-        model_error("cannot open file: " + path),
+        _mapping_error(path),
         "cannot open model file "
         + path
         + ": No such file or directory\nto download a model, run: ./mojo-dllm"
@@ -273,10 +281,27 @@ def test_missing_model_file_hint() raises:
     )
 
 
-def test_open_failure_reason_comes_from_the_os() raises:
+def test_missing_model_file_hint_with_quote_colon_in_path() raises:
+    var path = "/nonexistent/x': y"
     assert_equal(
-        open_failure_reason("/nonexistent/model.gguf"),
-        "No such file or directory",
+        _mapping_error(path),
+        "cannot open model file "
+        + path
+        + ": No such file or directory\nto download a model, run: ./mojo-dllm"
+        " pull",
+    )
+
+
+def test_other_open_failures_get_no_pull_hint() raises:
+    # ENOTDIR: a path below a regular file. EACCES takes the same branch.
+    var path = "tests/fixtures/bad-magic.gguf/x"
+    assert_equal(
+        _mapping_error(path),
+        "cannot open model file " + path + ": Not a directory",
+    )
+    assert_equal(
+        model_error("cannot open file: m.gguf: Permission denied"),
+        "cannot open model file m.gguf: Permission denied",
     )
 
 
