@@ -8,6 +8,10 @@ import pytest
 
 
 def harness(tmp_path, monkeypatch, mode):
+    # main() sets its device environment; restore the caller after each test.
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', 'test-device')
+    monkeypatch.setenv('OMP_NUM_THREADS', '1')
+    monkeypatch.setenv('MOJO_DLLM_GPU_PROFILE', '1')
     source = Path(__file__).resolve().parents[2] / 'bench/compare_gpu.py'
     spec = importlib.util.spec_from_file_location('gpu_compare', source)
     mod = importlib.util.module_from_spec(spec)
