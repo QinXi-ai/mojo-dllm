@@ -4,6 +4,8 @@ Standalone against upstream main `70a0880091c338c3c79e7ea9ee250941b50a9e87`. Thi
 
 Environment: Mojo 1.1.0 / max-core 26.6.0, sm_120, driver 595.104.02, RTX 6000D (156 SMs, 85,651 MiB). Each base/candidate pair uses the same GPU, 8 CPU threads and the same Q4_K_M GGUF. No power setting changes or other-job termination.
 
+Other GPU-resident processes were present during the split-branch rerun: the saved pre-run telemetry shows roughly 1 GiB already allocated before each measured process. These are same-card paired observations on a shared host, not exclusive-device measurements. GPU utilization samples alone cannot rule out interference; interpret small timing differences accordingly. Numerical output checks remain exact for the measured cases.
+
 ## Independent real-model forward
 
 Three alternating A/B–B/A process pairs per cell; each process runs four warmups and sixteen measured forwards. Same prompt token IDs and 32 requested raw output rows. Times include logits returned to host, exclude model loading and sampling. Ratios are medians of paired ratios.
