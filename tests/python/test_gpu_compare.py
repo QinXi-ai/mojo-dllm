@@ -33,7 +33,7 @@ def harness(tmp_path, monkeypatch, mode):
             return dict(ok=False, rc=1, error='fixture failure')
         ms = 20 if variant == 'base' else 10
         return dict(ok=True, generate_s=ms * 32 / 1000, ms_per_step=ms,
-                    forward_passes=16 if mode == 'short' and variant == 'new' else 32,
+                    forward_passes=16 if mode == 'both_short' or mode == 'short' and variant == 'new' else 32,
                     seq_len=150, text='same')
 
     bench.run_mojo = run
@@ -51,7 +51,7 @@ def test_gpu_compare_interleaves_and_excludes_warmup(tmp_path, monkeypatch):
     assert result['summary'][0]['median_paired_speedup'] == 2
 
 
-@pytest.mark.parametrize('mode', ['fail', 'short'])
+@pytest.mark.parametrize('mode', ['fail', 'short', 'both_short'])
 def test_gpu_compare_rejects_invalid_speedups(tmp_path, monkeypatch, mode):
     mod, output, _ = harness(tmp_path, monkeypatch, mode)
     with pytest.raises(SystemExit, match='failed|mismatch'):

@@ -74,7 +74,7 @@ def main():
             for pi in range(len(prompts)):
                 pair = {r['variant']: r for r in doc['runs'] if r['gen_length'] == length and r['rep'] == rep and r['prompt_index'] == pi}
                 a, b = pair['base'], pair['new']
-                if a['forward_passes'] != b['forward_passes'] or a['seq_len'] != b['seq_len']:
+                if not a['forward_passes'] == b['forward_passes'] == doc['steps'] or a['seq_len'] != b['seq_len']:
                     raise SystemExit('workload mismatch')
                 pairs.append(a['generate_s'] / b['generate_s'])
                 same_text &= a['text'] == b['text']

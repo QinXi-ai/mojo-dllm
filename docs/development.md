@@ -120,7 +120,7 @@ GPU; another GPU can run a different model's independent comparison.
 ```bash
 python3 bench/compare_gpu.py --base ../base --new . --model MODEL.gguf \
   --gpu GPU-UUID --lengths 128,256,512 --reps 3 --prompts 3 \
-  --out bench/results/dispatch.json
+  --out bench/results/dispatch/run.json
 CUDA_VISIBLE_DEVICES=GPU-UUID python3 bench/check_gpu_dispatch.py \
   --base ../base --new . --model MODEL.gguf --arch llada \
   --out bench/checks/dispatch-exact.json
@@ -132,7 +132,7 @@ compares complete generated token lists. It checks preservation of the base
 GPU computation, not correctness against an independent runtime. The timing
 comparison runs without the synchronizing `MOJO_DLLM_GPU_PROFILE` mode.
 
-### Quality evaluation
+### Quality
 
 `bench/eval_gsm8k.py` answers a fixed 200-problem GSM8K subset
 (`bench/eval/gsm8k-200.jsonl`, see `bench/eval/SOURCE.md`) and compares two
