@@ -1,13 +1,16 @@
 """Keep independent checkpoint results from overwriting or hiding each other."""
 
 import datetime as dt
+from contextlib import redirect_stdout
 import importlib.util
+import io
 import json
 from pathlib import Path
 import sys
 import unittest
 from unittest.mock import patch
 from tempfile import TemporaryDirectory
+from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -34,6 +37,27 @@ class ParityEvidenceTests(unittest.TestCase):
         self.assertEqual(gpu.name, "2026-10-30-dream-Dream-Coder.Q4_K_M-gpu.json")
         self.assertEqual(len({a, b, gpu}), 3)
         self.assertEqual(a.parent, ROOT / "bench/parity")
+
+    def test_two_same_day_cli_runs_save_both_checkpoints(self):
+        # Exercise the writer in main(), with inference omitted: the regression
+        # happened after the expensive model runs had already finished.
+        models = ["Dream-Coder.Q4_K_M.gguf", "DiffuCoder.Q4_K_M.gguf"]
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            with (
+                patch.object(parity_run, "ROOT", root),
+                patch.object(parity_run, "LOGIT_CASES", []),
+                patch.object(parity_run, "GEN_CASES", []),
+                patch.object(parity_run, "run", return_value="test-head"),
+                patch.dict(sys.modules, {"numpy": ModuleType("numpy")}),
+                redirect_stdout(io.StringIO()),
+            ):
+                for model in models:
+                    with patch.object(sys, "argv", ["parity.py", "--arch", "dream", "--model", model]):
+                        self.assertEqual(parity_run.main(), 0)
+            files = list((root / "bench/parity").glob("*.json"))
+            self.assertEqual(len(files), 2)
+            self.assertEqual({json.loads(f.read_text())["model"] for f in files}, set(models))
 
     def evidence(self, model, arch="llada", device="cpu", date="2026-10-30T10:00:00"):
         doc = json.loads((ROOT / "bench/parity/2026-10-03-llada.json").read_text())
