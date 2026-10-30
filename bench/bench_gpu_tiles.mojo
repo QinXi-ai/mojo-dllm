@@ -2,17 +2,38 @@
 from std.sys import argv
 from std.time import perf_counter_ns
 from max.gpu.host import DeviceContext
-from mojo_dllm.gpu.kernels import GpuQActs, dev_f32, dev_u8, quantize_gpu, staged_matrix_bytes, _launch
+from mojo_dllm.gpu.kernels import (
+    GpuQActs,
+    dev_f32,
+    dev_u8,
+    quantize_gpu,
+    staged_matrix_bytes,
+    _launch,
+)
 from mojo_dllm.sys.mem import Bytes, Floats, U8Ptr, F32Ptr
 from mojo_dllm.formats.gguf import GGML_Q4_K, GGML_Q6_K
 
-def measure[BN: Int](ctx: DeviceContext, typ: Int, w: U8Ptr, N: Int, K: Int, qa: GpuQActs, T: Int, dst: F32Ptr, reps: Int) raises -> Float64:
+
+def measure[
+    BN: Int
+](
+    ctx: DeviceContext,
+    typ: Int,
+    w: U8Ptr,
+    N: Int,
+    K: Int,
+    qa: GpuQActs,
+    T: Int,
+    dst: F32Ptr,
+    reps: Int,
+) raises -> Float64:
     ctx.synchronize()
     var start = perf_counter_ns()
     for _ in range(reps):
         _launch[BN](ctx, typ, w, N, K, qa, T, dst, N)
     ctx.synchronize()
     return Float64(perf_counter_ns() - start) / 1e6 / Float64(reps)
+
 
 def main() raises:
     var args = argv()
@@ -51,14 +72,66 @@ def main() raises:
                     var ms = Float64(0)
                     var bn = 32
                     if mode == 0:
-                        _ = measure[32](ctx, typ, dev_u8(w), N, K, qa, rows, dev_f32(out), 5)
-                        ms = measure[32](ctx, typ, dev_u8(w), N, K, qa, rows, dev_f32(out), 30)
+                        _ = measure[32](
+                            ctx, typ, dev_u8(w), N, K, qa, rows, dev_f32(out), 5
+                        )
+                        ms = measure[32](
+                            ctx,
+                            typ,
+                            dev_u8(w),
+                            N,
+                            K,
+                            qa,
+                            rows,
+                            dev_f32(out),
+                            30,
+                        )
                     elif mode == 1:
                         bn = 64
-                        _ = measure[64](ctx, typ, dev_u8(w), N, K, qa, rows, dev_f32(out), 5)
-                        ms = measure[64](ctx, typ, dev_u8(w), N, K, qa, rows, dev_f32(out), 30)
+                        _ = measure[64](
+                            ctx, typ, dev_u8(w), N, K, qa, rows, dev_f32(out), 5
+                        )
+                        ms = measure[64](
+                            ctx,
+                            typ,
+                            dev_u8(w),
+                            N,
+                            K,
+                            qa,
+                            rows,
+                            dev_f32(out),
+                            30,
+                        )
                     else:
                         bn = 80
-                        _ = measure[80](ctx, typ, dev_u8(w), N, K, qa, rows, dev_f32(out), 5)
-                        ms = measure[80](ctx, typ, dev_u8(w), N, K, qa, rows, dev_f32(out), 30)
-                    print('{"type":', typ, ',"N":', N, ',"K":', K, ',"T":', rows, ',"BN":', bn, ',"round":', round, ',"ms":', ms, '}')
+                        _ = measure[80](
+                            ctx, typ, dev_u8(w), N, K, qa, rows, dev_f32(out), 5
+                        )
+                        ms = measure[80](
+                            ctx,
+                            typ,
+                            dev_u8(w),
+                            N,
+                            K,
+                            qa,
+                            rows,
+                            dev_f32(out),
+                            30,
+                        )
+                    print(
+                        '{"type":',
+                        typ,
+                        ',"N":',
+                        N,
+                        ',"K":',
+                        K,
+                        ',"T":',
+                        rows,
+                        ',"BN":',
+                        bn,
+                        ',"round":',
+                        round,
+                        ',"ms":',
+                        ms,
+                        "}",
+                    )
