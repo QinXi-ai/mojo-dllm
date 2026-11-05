@@ -288,7 +288,7 @@ command line.
 
 The model file is 16.81 GB and mojo-dllm keeps its own repacked copy beside the
 mapping the reference holds, so the two never run together. `bench/parity.py`
-runs them in turns and compares saved files:
+runs them in turns and compares saved files.
 
 ```bash
 scripts/build_dg_ref.sh
@@ -306,8 +306,8 @@ temperature. It derives a separate bound for each prompt and each SC state from
 the reference's cached/unified comparison **in both directions**. The five metrics
 are minimum cosine, argmax fraction, mean top-5 overlap, maximum relative RMS,
 and maximum relative error of the largest logit. The lower-bound metrics take
-the smaller observed value; the error metrics take the larger. There is no
-multiplier or margin fitted to a fault injection. Every runtime variant must
+the smaller observed value and the error metrics take the larger. Calibration
+uses the original reference controls with unit scale and zero margin. Every runtime variant must
 meet its case/state bound, and every logit must satisfy the model's absolute
 soft-cap of 30. The raw calibration records are
 `bench/checks/2026-11-05-dg-sensitivity.json`; the Python code derives its numbers
@@ -330,8 +330,8 @@ original previous-step buffer and its temperature. Receipts bind those inputs
 to output contents and the executed binary/revision. The comparator verifies
 all receipts and expected output lengths before computing metrics. This also
 allows an independently executed candidate to agree bit for bit when a measured
-case has zero spread. Evidence records retain the candidate execution identity;
-the checkout used later to compare files does not determine that identity.
+case has zero spread. The parity record uses the candidate revision recorded
+at export.
 
 ### Reference sensitivity
 
@@ -339,8 +339,8 @@ the checkout used later to compare files does not determine that identity.
 unified and cached passes, independent repeats of both unified SC states, and
 an SC pass whose previous logits have a seeded relative perturbation of about
 1e-6. Same-path repeats had zero relative RMS in all eight comparisons. The
-table shows cached versus unified spread; perturbing the previous logits is a
-separate input-sensitivity diagnostic and does not set implementation tolerance.
+table shows cached versus unified spread. The perturbation results quantify input
+sensitivity. Implementation tolerance comes from the same-input cached/unified controls.
 
 <!-- dg-sensitivity:start -->
 | Case | Prompt tokens | no-SC min cosine / max rel. RMS | SC min cosine / max rel. RMS | noisy-SC median rel. RMS |
@@ -368,7 +368,7 @@ exactly to either cap. The report also retains total-variation and
 Jensen–Shannon distances at temperature 0.8 as diagnostics. The acceptance rule
 uses the five calibrated metrics and the explicit cap invariant.
 
-Reproduce the calibration and fault check serially:
+Run the calibration and fault check serially.
 
 ```bash
 python bench/dg_sensitivity.py --model "$MODEL" --ref build/dg_ref --llama-src "$DG_LLAMA_SRC" \
