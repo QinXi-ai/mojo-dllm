@@ -291,7 +291,10 @@ def test_dg_reference_bound_keeps_prompt_and_conditioning_states_separate() -> N
                                     min_cosine=cosine if state == "no-sc" else cosine - 0.1,
                                     same_inputs=True, expected_rejected=False))
     records += [dict(records[0], kind="previous-logit-noise", min_cosine=0.01, same_inputs=False),
-                dict(records[0], kind="layer 15 output scale dropped", min_cosine=0.02, expected_rejected=True)]
+                dict(records[0], kind="layer 15 output scale dropped", min_cosine=0.02, expected_rejected=True),
+                # A cache-path measurement can itself be a changed-input or fault experiment.
+                dict(records[0], min_cosine=0.03, same_inputs=False),
+                dict(records[0], min_cosine=0.04, expected_rejected=True)]
     bound = parity.dg_reference_bound(records)
     assert bound["short"]["no-sc"]["min_cosine"] == 0.92
     assert bound["short"]["sc"]["min_cosine"] == pytest.approx(0.82)
@@ -309,6 +312,12 @@ def test_softcap_invariant_catches_either_sign_and_non_finite_logits() -> None:
     assert parity.dg_softcap_violations(30.0, 30.0) == []
     assert "soft-cap" in parity.dg_softcap_violations(30.01, 30.0)[0]
     assert "finite" in parity.dg_softcap_violations(float("nan"), 30.0)[0]
+
+
+@pytest.mark.parametrize("maximum, cap", [(float("inf"), 30.0), (30.0, float("nan")),
+                                         (30.0, float("inf")), (1.0, 0.0), (1.0, -30.0)])
+def test_softcap_invariant_refuses_invalid_model_cap_or_logits(maximum: float, cap: float) -> None:
+    assert "finite" in parity.dg_softcap_violations(maximum, cap)[0]
 
 
 def test_fixed_input_bound_refuses_changed_model_canvas_and_sc_temperature() -> None:
@@ -353,3 +362,13 @@ def test_same_named_model_with_a_different_identity_is_refused() -> None:
     changed = dict(meta["model_provenance"], declared_hf_lfs_oid="different-object")
     with pytest.raises(SystemExit, match="model_identity"):
         parity.dg_case_bound(dict(meta, model_provenance=changed), "unified", bound)
+
+
+@pytest.mark.parametrize("field, value", [("filename", "different.gguf"), ("verified_bytes", 18)])
+def test_model_provenance_must_match_model_name_and_size(field: str, value: object) -> None:
+    source = dict(repository="fixture/model", revision="fixture", filename="tiny.gguf",
+                  verified_bytes=17, declared_hf_lfs_oid="existing-object-id")
+    meta = dict(model="tiny.gguf", model_bytes=17, model_provenance=source)
+    assert parity.dg_model_identity(meta)["provenance"]["filename"] == "tiny.gguf"
+    with pytest.raises(SystemExit, match="provenance filename or verified byte count"):
+        parity.dg_model_identity(dict(meta, model_provenance=dict(source, **{field: value})))

@@ -6,6 +6,9 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bench"))
@@ -114,3 +117,77 @@ def test_documented_spread_is_rendered_from_the_measurement_record() -> None:
     docs = (ROOT / "docs/correctness.md").read_text(encoding="utf-8")
     section = docs.split("<!-- dg-sensitivity:start -->\n", 1)[1].split("<!-- dg-sensitivity:end -->", 1)[0]
     assert section == check_dg_bound.render_sensitivity(evidence)
+
+
+def sensitivity_case_directories(tmp_path: Path) -> tuple[SimpleNamespace, Path, Path, dict]:
+    """Write a tiny complete measurement with a changed-weight output and shared SC input."""
+    np = pytest.importorskip("numpy")
+    original, dropped = tmp_path / "original/case0", tmp_path / "dropped/case0"
+    original.mkdir(parents=True)
+    dropped.mkdir(parents=True)
+    meta = dict(prompt="tiny", prompt_tokens=[2], canvas_tokens=[3], canvas_seed=66, canvas_length=1,
+                n_vocab=2, prev_temp_inv=1.25, final_logit_softcapping="30", threads=1,
+                model="tiny.gguf", model_sha256=None, llama_cpp_commit="pin", prev_file=str(original / "unified.ref.f32"))
+    for variant in (*sensitivity.parity.DG_VARIANTS, "unified-repeat", "unified-sc-repeat", "unified-sc-noisy"):
+        np.array([[1.0, 2.0]], dtype=np.float32).tofile(original / f"{variant}.ref.f32")
+    meta["controls"] = [row for row in sensitivity.controls(original, 2) if row["kind"] == "cache-path"]
+    (original / "case.json").write_text(json.dumps(meta))
+    (dropped / "case.json").write_text(json.dumps(dict(meta, model="mutant.gguf")))
+    for variant in sensitivity.parity.DG_VARIANTS:
+        np.array([[2.0, 1.0]], dtype=np.float32).tofile(dropped / f"{variant}.ref.f32")
+        command = ["tiny-ref", "--prev", meta["prev_file"], "--prev-temp-inv", "1.25"]
+        (dropped / f"{variant}.ref.run.json").write_text(json.dumps(dict(command=command)))
+    args = SimpleNamespace(cases=str(original.parent), dropped=str(dropped.parent), dropped_layer=15,
+                           temperature=0.8, out=str(tmp_path / "check.json"))
+    limits = dict(min_cosine=-1.0, argmax_fraction=1.0, mean_top5_overlap=2.0, max_rel_rms=0.0, max_top1_rel_err=0.0)
+    bound = dict(protocol="dg-fixed-input-v1", model=meta["model"], llama_cpp_commit="pin",
+                 cases={"tiny": dict(inputs=meta, states={"no-sc": limits, "sc": limits})})
+    return args, original, dropped, bound
+
+
+@pytest.mark.parametrize("operation", ["check", "sensitivity_report"])
+def test_bound_entrypoints_accept_original_previous_execution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str) -> None:
+    import check_dg_bound
+
+    args, _, _, bound = sensitivity_case_directories(tmp_path)
+    monkeypatch.setattr(check_dg_bound.parity, "dg_sensitivity_bound", lambda root: bound)
+    assert getattr(check_dg_bound, operation)(args) == 0
+
+
+@pytest.mark.parametrize("operation", ["check", "sensitivity_report"])
+@pytest.mark.parametrize("changed", ["metadata", "executed-previous", "executed-temperature", "missing-receipt"])
+def test_bound_entrypoints_refuse_mutant_previous_or_temperature(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                               operation: str, changed: str) -> None:
+    import check_dg_bound
+
+    args, _, dropped, bound = sensitivity_case_directories(tmp_path)
+    monkeypatch.setattr(check_dg_bound.parity, "dg_sensitivity_bound", lambda root: bound)
+    if changed == "metadata":
+        path = dropped / "case.json"
+        meta = json.loads(path.read_text())
+        meta["prev_file"] = str(dropped / "unified.ref.f32")
+        path.write_text(json.dumps(meta))
+    else:
+        path = dropped / "unified-sc.ref.run.json"
+        if changed == "missing-receipt":
+            path.unlink()
+        else:
+            receipt = json.loads(path.read_text())
+            if changed == "executed-previous":
+                receipt["command"][2] = str(dropped / "unified.ref.f32")
+            else:
+                receipt["command"][4] = "1.0"
+            path.write_text(json.dumps(receipt))
+    with pytest.raises(SystemExit, match="previous logits|original reference's previous|receipt.*missing"):
+        getattr(check_dg_bound, operation)(args)
+
+
+def test_bound_check_refuses_a_mutant_with_extra_canvas_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import check_dg_bound
+
+    np = pytest.importorskip("numpy")
+    args, _, dropped, bound = sensitivity_case_directories(tmp_path)
+    monkeypatch.setattr(check_dg_bound.parity, "dg_sensitivity_bound", lambda root: bound)
+    np.array([[2.0, 1.0], [2.0, 1.0]], dtype=np.float32).tofile(dropped / "unified.ref.f32")
+    with pytest.raises(SystemExit, match="differs in shape"):
+        check_dg_bound.check(args)

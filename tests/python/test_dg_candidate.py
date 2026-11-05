@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import struct
 import sys
 from pathlib import Path
@@ -28,6 +29,101 @@ def fixture(tmp_path: Path) -> tuple[Path, Path, dict]:
     (case / "case.json").write_text(json.dumps(meta))
     (case / "unified.ref.f32").write_bytes(struct.pack("<2f", 1.0, 2.0))
     return case, model, meta
+
+
+def runtime_command(*, sc: bool = False, code: str = "") -> list[str]:
+    program = "import pathlib,struct,sys; pathlib.Path(sys.argv[1]).write_bytes(struct.pack('<2f',1.,2.)); " + code
+    command = [sys.executable, "-c", program, "{out}", "{model}", "{case_json}", "{variant}"]
+    if sc:
+        command += ["{prev}", "{prev_temp_inv}"]
+    return command
+
+
+@pytest.mark.parametrize("changed", ["path", "size", "mtime"])
+def test_candidate_model_must_match_reference_source(tmp_path: Path, changed: str) -> None:
+    case, model, meta = fixture(tmp_path)
+    if changed == "path":
+        other = tmp_path / "other.gguf"
+        other.write_bytes(model.read_bytes())
+        os.utime(other, ns=(model.stat().st_atime_ns, meta["model_mtime_ns"]))
+        model = other
+    elif changed == "size":
+        model.write_bytes(model.read_bytes() + b"x")
+        os.utime(model, ns=(model.stat().st_atime_ns, meta["model_mtime_ns"]))
+    else:
+        os.utime(model, ns=(model.stat().st_atime_ns, model.stat().st_mtime_ns + 1_000_000_000))
+    with pytest.raises(SystemExit, match="source model"):
+        candidate.export_candidate(case, model, "unified", runtime_command(), candidate_revision="fixture")
+
+
+def test_candidate_rejects_unknown_variant_before_execution(tmp_path: Path) -> None:
+    case, model, _ = fixture(tmp_path)
+    with pytest.raises(SystemExit, match="unknown.*variant"):
+        candidate.export_candidate(case, model, "unknown", runtime_command(), candidate_revision="fixture")
+
+
+@pytest.mark.parametrize("missing", ["model", "out", "variant", "case_json", "prompt_csv", "canvas_csv", "prev", "prev_temp_inv"])
+def test_candidate_command_must_consume_every_required_input(tmp_path: Path, missing: str) -> None:
+    case, model, _ = fixture(tmp_path)
+    command = runtime_command(sc=True)
+    if missing in ("prompt_csv", "canvas_csv"):
+        command.remove("{case_json}")
+        command += ["{prompt_csv}", "{canvas_csv}"]
+    command.remove("{" + missing + "}")
+    with pytest.raises(SystemExit, match="input placeholders"):
+        candidate.export_candidate(case, model, "unified-sc", command, candidate_revision="fixture")
+
+
+def test_candidate_requires_nonempty_build_revision(tmp_path: Path) -> None:
+    case, model, _ = fixture(tmp_path)
+    with pytest.raises(SystemExit, match="candidate revision"):
+        candidate.export_candidate(case, model, "unified", runtime_command(), candidate_revision="  ")
+
+
+@pytest.mark.parametrize("fault, message", [("truncated", "must contain"), ("model", "model changed"), ("previous", "previous logits changed")])
+def test_candidate_does_not_issue_receipt_after_incomplete_or_changed_execution(tmp_path: Path, fault: str, message: str) -> None:
+    case, model, _ = fixture(tmp_path)
+    code = {
+        "truncated": "pathlib.Path(sys.argv[1]).write_bytes(struct.pack('<f',1.))",
+        "model": "pathlib.Path(sys.argv[2]).write_bytes(b'changed model')",
+        "previous": "pathlib.Path(sys.argv[5]).write_bytes(struct.pack('<2f',2.,1.))",
+    }[fault]
+    with pytest.raises(SystemExit, match=message):
+        candidate.export_candidate(case, model, "unified-sc", runtime_command(sc=True, code=code), candidate_revision="fixture")
+    assert not (case / "unified-sc.mojo.receipt.json").exists()
+
+
+@pytest.mark.parametrize("field, value", [("producer", "other"), ("exit_status", 7), ("argv", []), ("executable", {}), ("candidate_revision", "")])
+def test_receipt_requires_completed_identified_execution(tmp_path: Path, field: str, value: object) -> None:
+    case, model, meta = fixture(tmp_path)
+    candidate.export_candidate(case, model, "unified", runtime_command(), candidate_revision="fixture")
+    path = case / "unified.mojo.receipt.json"
+    receipt = json.loads(path.read_text())
+    target = receipt if field == "producer" else receipt["execution"]
+    target[field] = value
+    path.write_text(json.dumps(receipt))
+    with pytest.raises(SystemExit, match="completed candidate execution"):
+        parity.dg_validate_receipt(case, meta, "unified")
+
+
+def test_receipt_binds_previous_temperature(tmp_path: Path) -> None:
+    case, model, meta = fixture(tmp_path)
+    candidate.export_candidate(case, model, "unified-sc", runtime_command(sc=True), candidate_revision="fixture")
+    with pytest.raises(SystemExit, match="inputs"):
+        parity.dg_validate_receipt(case, dict(meta, prev_temp_inv=1.0), "unified-sc")
+
+
+def test_receipt_rejects_truncation_even_with_matching_output_identity(tmp_path: Path) -> None:
+    case, model, meta = fixture(tmp_path)
+    candidate.export_candidate(case, model, "unified", runtime_command(), candidate_revision="fixture")
+    out = case / "unified.mojo.f32"
+    out.write_bytes(struct.pack("<f", 1.0))
+    path = case / "unified.mojo.receipt.json"
+    receipt = json.loads(path.read_text())
+    receipt["output"] = dict(file=out.name, bytes=out.stat().st_size, sha256=parity._sha256(out))
+    path.write_text(json.dumps(receipt))
+    with pytest.raises(SystemExit, match="output"):
+        parity.dg_validate_receipt(case, meta, "unified")
 
 
 def test_executed_identical_output_has_a_valid_receipt_and_replaced_output_fails(tmp_path: Path) -> None:
@@ -102,6 +198,11 @@ def test_real_comparator_accepts_zero_spread_identical_executed_candidates(tmp_p
     entries, violations = parity.dg_compare(tmp_path, bound)
     assert len(entries) == 4 and violations == []
     assert all(e["candidate_receipt"]["execution"]["candidate_revision"] == "tiny-fixture" for e in entries)
+    # A complete candidate still cannot be compared against an extra reference row.
+    (case / "cached.ref.f32").write_bytes(struct.pack("<4f", 1.0, 2.0, 1.0, 2.0))
+    with pytest.raises(SystemExit, match="shape"):
+        parity.dg_compare(tmp_path, bound)
+    (case / "cached.ref.f32").write_bytes(struct.pack("<2f", 1.0, 2.0))
     # Truncating both sides in the same way used to satisfy the shape comparison.
     (case / "unified.ref.f32").write_bytes(struct.pack("<f", 1.0))
     (case / "unified.mojo.f32").write_bytes(struct.pack("<f", 1.0))
