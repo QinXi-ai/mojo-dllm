@@ -357,7 +357,9 @@ separate input-sensitivity diagnostic and does not set implementation tolerance.
 <!-- dg-sensitivity:end -->
 
 All 24 same-input positive controls pass, and each fault is detected on all 16
-case/variant pairs. Fault detection requires a rejection somewhere in the suite;
+case/variant pairs. A separate replay of the saved logits records the same
+verdicts in `bench/checks/2026-11-05-dg-rule-verification.json`.
+Fault detection requires a rejection somewhere in the suite;
 all positive controls must pass. The layer-15 mutant changes its output scale
 from 0.5234375 to 1.0. Its SC passes consume the original model's previous logits,
 which isolates the current forward pass. The soft-cap inverse promotes to f64
