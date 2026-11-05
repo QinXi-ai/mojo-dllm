@@ -68,9 +68,45 @@ def test_rejects_non_finite_tensor_values(tmp_path):
         traces.load(tmp_path)
 
 
+def test_rejects_an_empty_trace(tmp_path):
+    (tmp_path / "manifest.jsonl").write_text("")
+    with pytest.raises(ValueError, match="empty trace"):
+        traces.load(tmp_path)
+
+
+def test_load_preserves_logical_ggml_dimension_order(tmp_path):
+    write_trace(tmp_path, np.arange(16))
+    _, values = traces.load(tmp_path)[("unified", "l_out-0")]
+    assert values.shape == (1, 1, 2, 8)
+    np.testing.assert_array_equal(values[0, 0, 1], np.arange(8, 16))
+
+
+def test_rejects_a_prefill_dimension_that_is_not_the_prompt():
+    with pytest.raises(ValueError, match="prefill dimension 8 does not match prompt 9"):
+        traces.align(np.ones((1, 1, 265, 8)), np.ones((1, 1, 8, 8)), "prefill", 9)
+
+
+@pytest.mark.parametrize("unified_shape,cached_shape", [
+    ((1, 2, 265, 265), (1, 2, 9, 8)),
+    ((1, 2, 265, 266), (1, 2, 9, 9)),
+])
+def test_rejects_invalid_prefill_attention_axes(unified_shape, cached_shape):
+    with pytest.raises(ValueError, match="cannot align prefill attention"):
+        traces.align(np.ones(unified_shape), np.ones(cached_shape), "prefill", 9)
+
+
 def test_q8_k_reference_rounds_half_to_even_and_preserves_zero_rows():
     values = np.zeros((2, 256), dtype=np.float32)
     values[0, :4] = [127, 0.5, -1.5, -2.5]
     rounded = projection.q8_k_reference(values)
     np.testing.assert_array_equal(rounded[0, :4], [127, 0, -2, -2])
     np.testing.assert_array_equal(rounded[1], np.zeros(256))
+
+
+def test_q8_k_reference_scales_each_block_independently():
+    values = np.zeros((1, 512), dtype=np.float32)
+    values[0, :2] = [127, 0.5]
+    values[0, 256:258] = [63.5, 1.25]
+    rounded = projection.q8_k_reference(values)
+    np.testing.assert_array_equal(rounded[0, :2], [127, 0])
+    np.testing.assert_array_equal(rounded[0, 256:258], [63.5, 1])
