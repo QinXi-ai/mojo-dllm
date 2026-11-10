@@ -8,11 +8,6 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
-- Optional DiffusionGemma graph traces (`--trace-dir`, `--trace-only`) and
-  ordinary-buffer replay (`--no-repack`). `scripts/build_dg_ref.sh` also builds
-  `dg_matmul`. The projection, matrix, softmax and tiny-model checkers, together
-  with `compare_dg_traces.py`, record the cached/unified arithmetic differences
-  and independent forward comparisons for #163.
 - `scripts/capped.sh` runs a command in its own memory-capped systemd scope: a hard cap, no swap and a
   whole-scope kill on an OOM, so a job that outgrows the machine dies alone instead of taking its terminal with
   it. It refuses to start when less memory is available than the job needs or when the user manager cannot
@@ -47,6 +42,11 @@ semantic versioning (0.y: minor bumps may break things).
 - A Q5_0 reference decoder (22-byte blocks of 32 weights) with GGUF type sizing,
   a reference test against gguf-py's decoder and a hand-built block test of the
   high-bit layout. It is the first piece of the DiffusionGemma reader (#61).
+- Optional DiffusionGemma graph traces (`--trace-dir`, `--trace-only`) and
+  ordinary-buffer replay (`--no-repack`). `scripts/build_dg_ref.sh` also builds
+  `dg_matmul`. The projection, matrix, softmax and tiny-model checkers, together
+  with `compare_dg_traces.py`, record the cached/unified arithmetic differences
+  and independent forward comparisons for #163.
 - A `diffusion-gemma` branch of `ModelConfig` reads the DiffusionGemma
   metadata (per-layer sliding/global pattern and K/V head counts, head sizes and
   RoPE bases per kind, experts, canvas length, soft cap) and checks the tensor
