@@ -63,12 +63,13 @@ def attach_provenance(evidence: dict, cases: dict, provenance: pathlib.Path, ver
 
 def render_sensitivity(evidence: dict) -> str:
     """Markdown values come from the recorded measurements, never from prose edits."""
-    lines = ["| Case | Prompt tokens | no-SC min cosine / max rel. RMS | SC min cosine / max rel. RMS | noisy-SC median rel. RMS |",
+    bounds = parity.dg_reference_bound(evidence["records"])
+    lines = ["| Case | Prompt tokens | no-SC bound min cosine / max rel. RMS | SC bound min cosine / max rel. RMS | noisy-SC median rel. RMS |",
              "|---|---:|---:|---:|---:|"]
     for name, inputs in evidence["inputs"].items():
         records = [r for r in evidence["records"] if r["case"] == name]
-        no_sc = next(r for r in records if r["kind"] == "cache-path" and r["state"] == "no-sc")
-        sc = next(r for r in records if r["kind"] == "cache-path" and r["state"] == "sc")
+        no_sc = bounds[inputs["prompt"]]["no-sc"]
+        sc = bounds[inputs["prompt"]]["sc"]
         noisy = next(r for r in records if r["kind"] == "previous-logit-noise")
         lines.append(f"| {name} | {len(inputs['prompt_tokens'])} | {no_sc['min_cosine']:.5f} / {no_sc['max_rel_rms']:.5f} "
                      f"| {sc['min_cosine']:.5f} / {sc['max_rel_rms']:.5f} | {noisy['median_rel_rms']:.5f} |")
@@ -263,8 +264,11 @@ def make_mutant(args: argparse.Namespace) -> int:
     from gguf import GGUFReader
 
     src, out = pathlib.Path(args.model), pathlib.Path(args.out)
+    record_path = pathlib.Path(args.record) if getattr(args, "record", None) else None
     if out.exists():
         raise SystemExit(f"refusing: {out} exists")
+    if record_path and record_path.resolve() in (src.resolve(), out.resolve()):
+        raise SystemExit("refusing: the mutation record path must differ from both model paths")
     name = f"blk.{args.layer}.layer_output_scale.weight"
     reader = GGUFReader(str(src))
     found = [t for t in reader.tensors if t.name == name]
@@ -289,6 +293,14 @@ def make_mutant(args: argparse.Namespace) -> int:
         out.unlink()
         raise SystemExit(f"refusing: {name} reads {after} after the patch, not 1.0")
     print(f"{name}: {before} -> {after} in {out}")
+    if record_path:
+        record = dict(schema_version=1, experiment="layer-output-scale-mutant",
+                      date=dt.datetime.now(dt.timezone.utc).isoformat(),
+                      tensor=dict(name=name, before=before, after=after, data_offset=int(tensor.data_offset),
+                                  type="F32"),
+                      source=dict(file=src.name, bytes=src.stat().st_size, sha256=parity._sha256(src)),
+                      mutant=dict(file=out.name, bytes=out.stat().st_size, sha256=parity._sha256(out)))
+        record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     return 0
 
 
@@ -304,6 +316,7 @@ def main() -> int:
     mk.add_argument("model")
     mk.add_argument("--layer", type=int, required=True)
     mk.add_argument("--out", required=True)
+    mk.add_argument("--record", help="write mutation values, sizes and SHA-256 identities; hashes both model files")
     report = sub.add_parser("analyze-sensitivity", help="assess controls and mutants without changing the parity rule")
     report.add_argument("cases")
     report.add_argument("--dropped", required=True)

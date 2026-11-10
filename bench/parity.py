@@ -404,14 +404,15 @@ def dg_compare(
                     f"refusing: mojo-dllm's output {mojo} is missing. The DiffusionGemma forward pass is #64 "
                     "and has to write this file; the reference's own output is never compared with itself."
                 )
-            if bound.get("protocol") == "dg-fixed-input-v1":
+            case_bound = dg_case_bound(meta, v, bound)
+            fixed_input = bound.get("protocol") == "dg-fixed-input-v1"
+            if fixed_input:
                 receipt = dg_validate_receipt(d, meta, v)
-            elif mojo.read_bytes() == ref.read_bytes():
+            if (not fixed_input or case_bound["max_rel_rms"] > 0) and mojo.read_bytes() == ref.read_bytes():
                 raise SystemExit(
-                    f"refusing: {mojo} is byte-identical to {ref}. Two runtimes that quantize differently "
-                    "do not agree to the last bit, so this is a copy, not a result."
+                    f"refusing: {mojo} is byte-identical to {ref}; this comparison requires a distinct "
+                    "candidate output when the measured reference spread is nonzero."
                 )
-            dg_case_bound(meta, v, bound)
             if "ref_spread" not in meta:
                 raise SystemExit(f"refusing: {case_json} has no ref_spread; run --phase ref again")
             plan.append((meta, v, ref, mojo, receipt))

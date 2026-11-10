@@ -319,19 +319,30 @@ The record includes every prompt/canvas token ID, seeds 66–69, the 256-token
 canvas, vocabulary size, and `prev_temp_inv=1.25`. The GGUF provenance names the
 Hugging Face repository, pinned revision and declared LFS object ID, with the
 download's verified byte count. A different input/model requires its own
-measurement. The calibration used eight CPU threads with repacking enabled;
-`source` also records the reconstructed pinned build and the 403/403 compilation
-inputs checked against the pinned upstream content.
+measurement. The calibration used eight CPU threads with repacking enabled on
+an AMD EPYC 9J14, with native AVX512 CPU kernels. `reference_configuration`
+records the CPU model, ISA, compiler flags and affinity. `source` records the
+reconstructed pinned build and the 403/403 compilation inputs checked against
+the pinned upstream content.
 
 `bench/dg_candidate.py` executes the supplied candidate command without a shell
 and writes an execution receipt alongside each `*.mojo.f32`. Its argv template
 passes the model, variant, full case inputs, output path and, for SC, the shared
 original previous-step buffer and its temperature. Receipts bind those inputs
 to output contents and the executed binary/revision. The comparator verifies
-all receipts and expected output lengths before computing metrics. This also
-allows an independently executed candidate to agree bit for bit when a measured
-case has zero spread. The parity record uses the candidate revision recorded
-at export.
+all receipts and expected output lengths before computing metrics. Each measured
+case/state has nonzero reference spread, so the protocol also refuses a candidate
+output that is byte-identical to its reference. This safeguard catches a command
+that simply copies the reference despite producing an otherwise valid receipt.
+The parity record uses the candidate revision recorded at export.
+
+A pass establishes agreement with the measured envelope on these fixed inputs,
+including the model's soft-cap and execution-receipt checks. Correctness
+assessment also needs independent numerical checks and broader input coverage.
+A failure calls for investigation of the inputs, weights and arithmetic path.
+Both an implementation defect and a valid change in floating-point rounding can
+fall outside this empirical envelope. The previous-logit perturbation diagnostic
+shows how sensitive this model is to small input changes.
 
 ### Reference sensitivity
 
@@ -339,16 +350,17 @@ at export.
 unified and cached passes, independent repeats of both unified SC states, and
 an SC pass whose previous logits have a seeded relative perturbation of about
 1e-6. Same-path repeats had zero relative RMS in all eight comparisons. The
-table shows cached versus unified spread. The perturbation results quantify input
-sensitivity. Implementation tolerance comes from the same-input cached/unified controls.
+table shows the bound derived from both directions of the cached/unified spread.
+The perturbation results quantify input sensitivity. Implementation tolerance
+comes from the same-input cached/unified controls.
 
 <!-- dg-sensitivity:start -->
-| Case | Prompt tokens | no-SC min cosine / max rel. RMS | SC min cosine / max rel. RMS | noisy-SC median rel. RMS |
+| Case | Prompt tokens | no-SC bound min cosine / max rel. RMS | SC bound min cosine / max rel. RMS | noisy-SC median rel. RMS |
 |---|---:|---:|---:|---:|
-| case0 | 8 | 0.91919 / 0.40245 | 0.82027 / 0.61085 | 0.25812 |
+| case0 | 8 | 0.91919 / 0.40245 | 0.82027 / 0.71433 | 0.25812 |
 | case1 | 14 | 0.94080 / 0.34426 | 0.94369 / 0.34135 | 0.20590 |
-| case2 | 14 | 0.88880 / 0.47896 | 0.92500 / 0.38092 | 0.20348 |
-| case3 | 23 | 0.96107 / 0.27980 | 0.97264 / 0.28693 | 0.14547 |
+| case2 | 14 | 0.88880 / 0.47999 | 0.92500 / 0.40011 | 0.20348 |
+| case3 | 23 | 0.96107 / 0.30512 | 0.97264 / 0.28693 | 0.14547 |
 
 | Fault injection | Rejected case/variant comparisons |
 |---|---:|
@@ -356,34 +368,71 @@ sensitivity. Implementation tolerance comes from the same-input cached/unified c
 | soft-cap removed | 16 / 16 |
 <!-- dg-sensitivity:end -->
 
-All 24 same-input positive controls pass, and each fault is detected on all 16
-case/variant pairs. A separate replay of the saved logits records the same
+Held-out runs on case0 used the frozen bounds above. With four threads, all four
+variants pass and agree bit for bit with their eight-thread counterparts. Two
+additional eight-thread unified passes with repacking disabled fall outside the
+envelope. Their maximum relative RMS is 0.49618 without SC and 0.81689 with SC,
+against bounds of 0.40245 and 0.71433. These are valid reference runs with another
+weight arithmetic path. The observed rejections establish that the protocol's
+rounding coverage is configuration-dependent. Their complete commands, CPU
+configuration, inputs, metrics and verdicts are in
+`bench/checks/2026-11-10-dg-heldout.json`. The held-out records are evaluated
+separately from the cached/unified records that define the bounds.
+
+The 24 same-input calibration controls comprise the 16 cached/unified comparisons
+that define the bound and eight zero-error repeats. Each fault is detected on all
+16 case/variant pairs. A separate replay of the saved logits records the same
 verdicts in `bench/checks/2026-11-05-dg-rule-verification.json`.
 Fault detection requires a rejection somewhere in the suite;
 all positive controls must pass. The layer-15 mutant changes its output scale
-from 0.5234375 to 1.0. Its SC passes consume the original model's previous logits,
+from 0.5234375 to 1.0. `bench/checks/2026-11-10-dg-mutant.json` records the
+tensor name, byte offset, before/after values, byte counts, hashes and the
+`make-mutant` output. The regenerated mutant matches the file used for the
+measurements, and the original model hash matches its declared Hugging Face LFS
+object ID. Its SC passes consume the original model's previous logits,
 which isolates the current forward pass. The soft-cap inverse promotes to f64
 before clipping to a representable value below one, including logits rounded
 exactly to either cap. The report also retains total-variation and
 Jensen–Shannon distances at temperature 0.8 as diagnostics. The acceptance rule
-uses the five calibrated metrics and the explicit cap invariant.
+uses the five calibrated metrics and the explicit cap invariant. For soft-cap
+removal, the cap invariant and largest-logit error detect the fault. The other
+four calibrated metrics stay within their bounds in all 16 comparisons.
 
-Run the calibration and fault check serially.
+Run the calibration and fault check serially. The provenance files below use the
+same structure as the committed download and reconstructed-source records.
 
 ```bash
+python - <<'PY'
+import json
+from pathlib import Path
+record = json.loads(Path("bench/checks/2026-11-05-dg-sensitivity.json").read_text())
+for filename, value in (
+    ("model-provenance.json", record["model_provenance"]),
+    ("source-manifest.json", record["source"]["manifest"]),
+    ("reference-verification.json", record["source"]["compilation_input_verification"]),
+):
+    Path(filename).write_text(json.dumps(value, indent=2) + "\n")
+PY
 python bench/dg_sensitivity.py --model "$MODEL" --ref build/dg_ref --llama-src "$DG_LLAMA_SRC" \
-    --model-provenance model-provenance.json --threads 8 --out build/dg-study/original
-python bench/check_dg_bound.py make-mutant "$MODEL" --layer 15 --out build/layer15-dropped.gguf
+    --model-provenance model-provenance.json --source-manifest source-manifest.json \
+    --threads 8 --out build/dg-study/original
+python bench/check_dg_bound.py make-mutant "$MODEL" --layer 15 --out build/layer15-dropped.gguf \
+    --record build/dg-study/mutant.json
 python bench/dg_sensitivity.py --model build/layer15-dropped.gguf --ref build/dg_ref \
-    --llama-src "$DG_LLAMA_SRC" --threads 8 --out build/dg-study/dropped --original build/dg-study/original
+    --llama-src "$DG_LLAMA_SRC" --source-manifest source-manifest.json \
+    --threads 8 --out build/dg-study/dropped --original build/dg-study/original
 python bench/check_dg_bound.py analyze-sensitivity build/dg-study/original \
     --dropped build/dg-study/dropped --dropped-layer 15 --out build/dg-study/sensitivity.json
+python bench/check_dg_bound.py attach-provenance build/dg-study/sensitivity.json \
+    --cases build/dg-study/original --dropped build/dg-study/dropped \
+    --model-provenance model-provenance.json --reference-verification reference-verification.json
 python bench/check_dg_bound.py check build/dg-study/original \
     --dropped build/dg-study/dropped --dropped-layer 15 --out build/dg-study/check.json
 python bench/check_dg_bound.py render-sensitivity bench/checks/2026-11-05-dg-sensitivity.json
 ```
 
-The 44 full-model forwards used the pinned reference only. The runtime forward
+The initial study used 44 full-model reference forwards, and the held-out checks
+add six. The runtime forward
 pass and its resulting parity record remain the #64 work.
 
 The tokenizer goldens in `tests/fixtures/gemma4-tokenizer-golden.tsv` fix the

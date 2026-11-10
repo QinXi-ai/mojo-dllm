@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
+import struct
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -119,6 +122,129 @@ def test_documented_spread_is_rendered_from_the_measurement_record() -> None:
     assert section == check_dg_bound.render_sensitivity(evidence)
 
 
+def test_sensitivity_table_includes_the_reverse_direction_in_each_bound() -> None:
+    import check_dg_bound
+
+    evidence = json.loads((ROOT / sensitivity.parity.DG_SENSITIVITY_EVIDENCE).read_text(encoding="utf-8"))
+    reverse = next(row for row in evidence["records"]
+                   if row["case"] == "case0" and row["state"] == "sc" and row["kind"] == "cache-path-reverse")
+    reverse["max_rel_rms"] = 1.23456
+    row = next(line for line in check_dg_bound.render_sensitivity(evidence).splitlines() if line.startswith("| case0 |"))
+    assert " / 1.23456 |" in row
+
+
+def test_documented_layer15_scale_matches_the_recorded_model_mutation() -> None:
+    record = json.loads((ROOT / "bench/checks/2026-11-10-dg-mutant.json").read_text(encoding="utf-8"))
+    calibration = json.loads((ROOT / sensitivity.parity.DG_SENSITIVITY_EVIDENCE).read_text(encoding="utf-8"))
+    docs = (ROOT / "docs/correctness.md").read_text(encoding="utf-8")
+    values = re.search(r"layer-15 mutant.*?\bfrom\s+`?([0-9]+(?:\.[0-9]+)?)`?\s+to\s+`?([0-9]+(?:\.[0-9]+)?)`?",
+                       docs, flags=re.S)
+    assert values is not None, "the mutant's original and replacement scales must be documented"
+    assert tuple(map(float, values.groups())) == (record["tensor"]["before"], record["tensor"]["after"])
+    assert record["tensor"]["name"] == "blk.15.layer_output_scale.weight"
+    assert record["tensor"]["type"] == "F32"
+    assert 0 <= record["tensor"]["data_offset"] <= record["source"]["bytes"] - 4
+    assert record["source"]["file"] == calibration["model"]
+    assert record["source"]["bytes"] == calibration["model_identity"]["bytes"]
+    assert record["source"]["sha256"] == calibration["model_provenance"]["declared_hf_lfs_oid"]
+    for key in ("file", "bytes", "sha256"):
+        assert record["mutant"][key] == record["measured_mutant"][key]
+    assert record["mutant"]["bytes"] == record["source"]["bytes"]
+    assert re.fullmatch(r"[0-9a-f]{64}", record["mutant"]["sha256"])
+    assert record["measured_mutant"]["matches_regenerated"] is True
+
+
+def test_heldout_verdicts_and_documented_rms_use_the_frozen_calibration() -> None:
+    parity = sensitivity.parity
+    heldout = json.loads((ROOT / "bench/checks/2026-11-10-dg-heldout.json").read_text(encoding="utf-8"))
+    calibration = json.loads((ROOT / parity.DG_SENSITIVITY_EVIDENCE).read_text(encoding="utf-8"))
+    assert heldout["calibration"] == parity.DG_SENSITIVITY_EVIDENCE
+    assert heldout["calibration_unchanged"] is True
+    assert heldout["reference_commit"] == calibration["llama_cpp_commit"]
+    for configuration in (heldout["configuration"], calibration["reference_configuration"]):
+        assert configuration["cpu_model"] and configuration["isa"]
+        assert configuration["cpu_compilation_flags"]
+    inputs = calibration["inputs"]["case0"]
+    assert all(heldout[key] == inputs[key] for key in ("prompt", "prompt_tokens", "canvas_tokens", "prev_temp_inv"))
+    frozen = parity.dg_reference_bound(calibration["records"])[heldout["prompt"]]
+    loaded = parity.dg_sensitivity_bound(ROOT)["cases"][heldout["prompt"]]["states"]
+    assert loaded == frozen
+    threaded, unpacked = heldout["results"], heldout["repacking_off_results"]
+    assert {row["variant"] for row in threaded} == set(parity.DG_VARIANTS)
+    assert {row["variant"] for row in unpacked} == {"unified", "unified-sc"}
+    for row in threaded + unpacked:
+        state = "sc" if row["variant"].endswith("-sc") else "no-sc"
+        assert row["bound"] == frozen[state]
+        violations = parity.dg_violations(row, frozen[state])
+        violations += parity.dg_softcap_violations(row["max_abs_logit"], float(inputs["final_logit_softcapping"]))
+        assert row["violations"] == violations
+        assert row["passed"] == (not violations)
+    assert all(row["passed"] and row["max_rel_rms"] == 0 and row["byte_identical"] is True for row in threaded)
+    assert all(not row["passed"] and not row["cpu_repacking"] and row["byte_identical"] is False for row in unpacked)
+    assert heldout["all_passed"] == all(row["passed"] for row in threaded + unpacked)
+    docs = (ROOT / "docs/correctness.md").read_text(encoding="utf-8")
+    numbers = re.search(r"maximum relative RMS is ([0-9.]+) without SC and ([0-9.]+) with SC,\s*"
+                        r"against bounds of ([0-9.]+) and ([0-9]+\.[0-9]+)", docs)
+    assert numbers is not None
+    by_variant = {row["variant"]: row for row in unpacked}
+    expected = (by_variant["unified"]["max_rel_rms"], by_variant["unified-sc"]["max_rel_rms"],
+                frozen["no-sc"]["max_rel_rms"], frozen["sc"]["max_rel_rms"])
+    assert numbers.groups() == tuple(f"{value:.5f}" for value in expected)
+
+
+@pytest.mark.parametrize("recorded", [False, True])
+def test_make_mutant_optionally_records_the_actual_patch_and_file_identities(tmp_path: Path,
+                                                                          monkeypatch: pytest.MonkeyPatch,
+                                                                          recorded: bool) -> None:
+    import check_dg_bound
+
+    source, mutant, record_path = tmp_path / "source.gguf", tmp_path / "mutant.gguf", tmp_path / "mutation.json"
+    source.write_bytes(b"GGUF" + struct.pack("<f", 0.5234375))
+
+    def read_fixture(path: str) -> SimpleNamespace:
+        value = struct.unpack("<f", Path(path).read_bytes()[4:8])[0]
+        tensor = SimpleNamespace(name="blk.15.layer_output_scale.weight", data_offset=4, data=[value],
+                                 n_elements=1, tensor_type=SimpleNamespace(name="F32"))
+        return SimpleNamespace(tensors=[tensor])
+
+    monkeypatch.setitem(sys.modules, "gguf", SimpleNamespace(GGUFReader=read_fixture))
+    original_sha256 = check_dg_bound.parity._sha256
+    hashed = []
+
+    def file_identity(path: Path) -> str:
+        hashed.append(path)
+        return original_sha256(path)
+
+    monkeypatch.setattr(check_dg_bound.parity, "_sha256", file_identity)
+    args = SimpleNamespace(model=str(source), layer=15, out=str(mutant), record=str(record_path) if recorded else None)
+    assert check_dg_bound.make_mutant(args) == 0
+    assert source.read_bytes() == b"GGUF" + struct.pack("<f", 0.5234375)
+    assert mutant.read_bytes() == b"GGUF" + struct.pack("<f", 1.0)
+    assert hashed == ([source, mutant] if recorded else [])
+    assert record_path.exists() is recorded
+    if recorded:
+        record = json.loads(record_path.read_text())
+        assert record["tensor"] == dict(name="blk.15.layer_output_scale.weight", before=0.5234375, after=1.0,
+                                        data_offset=4, type="F32")
+        assert record["source"] == dict(file=source.name, bytes=8, sha256=original_sha256(source))
+        assert record["mutant"] == dict(file=mutant.name, bytes=8, sha256=original_sha256(mutant))
+
+
+@pytest.mark.parametrize("record_name", ["source.gguf", "mutant.gguf"])
+def test_make_mutant_record_cannot_overwrite_either_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                       record_name: str) -> None:
+    import check_dg_bound
+
+    monkeypatch.setitem(sys.modules, "gguf", SimpleNamespace(GGUFReader=lambda path: None))
+    source, mutant = tmp_path / "source.gguf", tmp_path / "mutant.gguf"
+    source.write_bytes(b"original model")
+    args = SimpleNamespace(model=str(source), layer=15, out=str(mutant), record=str(tmp_path / record_name))
+    with pytest.raises(SystemExit, match="record path must differ"):
+        check_dg_bound.make_mutant(args)
+    assert source.read_bytes() == b"original model"
+    assert not mutant.exists()
+
+
 def sensitivity_case_directories(tmp_path: Path) -> tuple[SimpleNamespace, Path, Path, dict]:
     """Write a tiny complete measurement with a changed-weight output and shared SC input."""
     np = pytest.importorskip("numpy")
@@ -191,3 +317,44 @@ def test_bound_check_refuses_a_mutant_with_extra_canvas_rows(tmp_path: Path, mon
     np.array([[2.0, 1.0], [2.0, 1.0]], dtype=np.float32).tofile(dropped / "unified.ref.f32")
     with pytest.raises(SystemExit, match="differs in shape"):
         check_dg_bound.check(args)
+
+
+@pytest.mark.parametrize("fault", ["rejected-control", "accepted-mutant"])
+def test_bound_check_reports_failures_and_cli_exits_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                     fault: str) -> None:
+    import check_dg_bound
+
+    np = pytest.importorskip("numpy")
+    args, original, dropped, bound = sensitivity_case_directories(tmp_path)
+    if fault == "rejected-control":
+        np.array([[2.0, 1.0]], dtype=np.float32).tofile(original / "cached.ref.f32")
+        message = "unmodified reference was rejected"
+    else:
+        for variant in sensitivity.parity.DG_VARIANTS:
+            np.array([[1.0, 2.0]], dtype=np.float32).tofile(dropped / f"{variant}.ref.f32")
+        message = "layer 15 output scale dropped: accepted on every case and variant"
+    monkeypatch.setattr(check_dg_bound.parity, "dg_sensitivity_bound", lambda root: bound)
+    assert check_dg_bound.check(args) == 1
+    report = json.loads(Path(args.out).read_text())
+    assert report["all_as_expected"] is False
+    if fault == "rejected-control":
+        assert any(not row["is_mutant"] and row["rejected"] for row in report["results"])
+    else:
+        assert report["mutants_rejected"]["layer 15 output scale dropped"] is False
+    bound_path = tmp_path / "fixture-bound.json"
+    bound_path.write_text(json.dumps(bound))
+    # Exercise the actual argument parser and process exit with the same tiny bound.
+    program = (
+        "import json,pathlib,sys; "
+        f"sys.path.insert(0,{str(ROOT / 'bench')!r}); "
+        "import check_dg_bound as check; "
+        f"bound=json.loads(pathlib.Path({str(bound_path)!r}).read_text()); "
+        "check.parity.dg_sensitivity_bound=lambda root: bound; "
+        "sys.argv=['check_dg_bound.py',*sys.argv[1:]]; "
+        "raise SystemExit(check.main())"
+    )
+    result = subprocess.run([sys.executable, "-c", program, "check", args.cases, "--dropped", args.dropped,
+                             "--dropped-layer", "15", "--out", args.out], capture_output=True, text=True)
+    assert result.returncode == 1, result.stderr
+    assert message in result.stderr
+    assert json.loads(Path(args.out).read_text())["all_as_expected"] is False

@@ -1226,12 +1226,12 @@
     }
   },
   "model": "diffusiongemma-26B-A4B-it-Q4_K_M.gguf",
-  "model_sha256": null,
+  "model_sha256": "24523b6c833c9ce9f5f34f9b333ab1517d73d6f1e76a103645353114c8028bc5",
   "llama_cpp_commit": "2e715c0639c6f07c57c943f8d5a7919953af8f7c",
   "dropped_layer": 15,
   "dropped_model": {
     "model": "layer15-scale-dropped.gguf",
-    "model_sha256": null
+    "model_sha256": "604052d90ed5b9a5e90d7201617a5d9fb39c044aa3987b1d4764e12feb1ea0df"
   },
   "results": [
     {
@@ -2721,5 +2721,11 @@
     "soft-cap removed": true,
     "layer 15 output scale dropped": true
   },
-  "all_as_expected": true
+  "all_as_expected": true,
+  "artifact_identity_verification": {
+    "record": "bench/checks/2026-11-10-dg-mutant.json",
+    "verified_on": "2026-11-10",
+    "source_sha256": "24523b6c833c9ce9f5f34f9b333ab1517d73d6f1e76a103645353114c8028bc5",
+    "mutant_sha256": "604052d90ed5b9a5e90d7201617a5d9fb39c044aa3987b1d4764e12feb1ea0df"
+  }
 }

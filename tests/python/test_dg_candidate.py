@@ -93,6 +93,15 @@ def test_candidate_does_not_issue_receipt_after_incomplete_or_changed_execution(
     assert not (case / "unified-sc.mojo.receipt.json").exists()
 
 
+def test_candidate_nonzero_exit_cannot_issue_a_receipt_even_after_writing_output(tmp_path: Path) -> None:
+    case, model, _ = fixture(tmp_path)
+    with pytest.raises(SystemExit, match="exit status 7; no receipt written"):
+        candidate.export_candidate(case, model, "unified", runtime_command(code="sys.exit(7)"),
+                                   candidate_revision="fixture")
+    assert (case / "unified.mojo.f32").is_file()
+    assert not (case / "unified.mojo.receipt.json").exists()
+
+
 @pytest.mark.parametrize("field, value", [("producer", "other"), ("exit_status", 7), ("argv", []), ("executable", {}), ("candidate_revision", "")])
 def test_receipt_requires_completed_identified_execution(tmp_path: Path, field: str, value: object) -> None:
     case, model, meta = fixture(tmp_path)
@@ -208,3 +217,47 @@ def test_real_comparator_accepts_zero_spread_identical_executed_candidates(tmp_p
     (case / "unified.mojo.f32").write_bytes(struct.pack("<f", 1.0))
     with pytest.raises(SystemExit, match="output"):
         parity.dg_compare(tmp_path, bound)
+
+
+@pytest.mark.parametrize("state", ["no-sc", "sc"])
+def test_protocol_refuses_copied_output_with_a_valid_receipt_and_nonzero_spread(tmp_path: Path, state: str) -> None:
+    case, model, meta = fixture(tmp_path)
+    meta["ref_spread"] = {}
+    (case / "case.json").write_text(json.dumps(meta))
+    for variant in parity.DG_VARIANTS:
+        (case / f"{variant}.ref.f32").write_bytes(struct.pack("<2f", 1.0, 2.0))
+        program = "import pathlib,shutil,sys; shutil.copyfile(pathlib.Path(sys.argv[1]).with_name(sys.argv[2]+'.ref.f32'),sys.argv[3])"
+        command = [sys.executable, "-c", program, "{case_json}", "{variant}", "{out}", "{model}"]
+        if variant.endswith("-sc"):
+            command += ["{prev}", "{prev_temp_inv}"]
+        candidate.export_candidate(case, model, variant, command, candidate_revision="copy-fixture")
+    zero = dict(min_cosine=0.99, argmax_fraction=1.0, mean_top5_overlap=2.0,
+                max_rel_rms=0.0, max_top1_rel_err=0.0)
+    states = {"no-sc": zero, "sc": zero}
+    states[state] = dict(zero, max_rel_rms=0.1)
+    bound = dict(protocol="dg-fixed-input-v1", model=meta["model"], llama_cpp_commit="pin",
+                 cases={"fixed": dict(inputs=meta, states=states)})
+    expected = "unified-sc.mojo.f32" if state == "sc" else "unified.mojo.f32"
+    with pytest.raises(SystemExit, match=f"{expected}.*byte-identical"):
+        parity.dg_compare(tmp_path, bound)
+
+
+def test_protocol_softcap_rejects_executed_outputs_with_all_distance_metrics_in_bound(tmp_path: Path) -> None:
+    pytest.importorskip("numpy")
+    case, model, meta = fixture(tmp_path)
+    meta["ref_spread"] = {}
+    (case / "case.json").write_text(json.dumps(meta))
+    for variant in parity.DG_VARIANTS:
+        (case / f"{variant}.ref.f32").write_bytes(struct.pack("<2f", 29.0, 14.0))
+        command = runtime_command(sc=variant.endswith("-sc"),
+                                  code="pathlib.Path(sys.argv[1]).write_bytes(struct.pack('<2f',31.,15.))")
+        candidate.export_candidate(case, model, variant, command, candidate_revision="cap-fixture")
+    limits = dict(min_cosine=0.9, argmax_fraction=1.0, mean_top5_overlap=2.0,
+                  max_rel_rms=0.5, max_top1_rel_err=0.5)
+    bound = dict(protocol="dg-fixed-input-v1", model=meta["model"], llama_cpp_commit="pin",
+                 cases={"fixed": dict(inputs=meta, states={"no-sc": limits, "sc": limits})})
+    entries, violations = parity.dg_compare(tmp_path, bound)
+    assert len(entries) == 4
+    assert all(parity.dg_violations(entry, limits) == [] for entry in entries)
+    assert all(entry["max_abs_logit"] == 31.0 for entry in entries)
+    assert len(violations) == 4 and all("exceeds model soft-cap 30" in message for message in violations)
