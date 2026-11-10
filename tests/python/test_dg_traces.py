@@ -81,6 +81,56 @@ def test_load_preserves_logical_ggml_dimension_order(tmp_path):
     np.testing.assert_array_equal(values[0, 0, 1], np.arange(8, 16))
 
 
+def test_compare_preserves_order_alignment_and_one_ulp_differences(tmp_path):
+    unified, cached = tmp_path / "unified", tmp_path / "cached"
+    unified.mkdir()
+    cached.mkdir()
+    records = {unified: [], cached: []}
+
+    def add(folder, phase, name, values):
+        filename = f"{phase}-{name}.f32"
+        values.tofile(folder / filename)
+        records[folder].append(dict(phase=phase, name=name, file=filename, ne=list(values.shape[::-1])))
+
+    values = np.ones((1, 1, 3, 8), dtype="<f4")
+    for name in ("attn_norm-0", "Qcur-0"):
+        add(unified, "unified", name, values)
+        prefill = values[:, :, :1].copy()
+        decode = values[:, :, 1:].copy()
+        if name == "Qcur-0":
+            prefill.view(np.uint32)[0, 0, 0, 3] += 1
+        add(cached, "prefill", name, prefill)
+        add(cached, "decode", name, decode)
+    for folder, entries in records.items():
+        (folder / "manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in entries))
+
+    results = traces.compare(unified, cached, prompt=1)
+    assert [(r["name"], r["phase"]) for r in results] == [
+        ("attn_norm-0", "prefill"), ("attn_norm-0", "decode"),
+        ("Qcur-0", "prefill"), ("Qcur-0", "decode"),
+    ]
+    assert [r["bit_equal"] for r in results] == [True, True, False, True]
+    assert [r["rows"] for r in results] == [1, 2, 1, 2]
+    assert results[2]["max_abs_diff"] == float(np.spacing(np.float32(1)))
+    assert results[2]["unified_ne"] == [8, 3, 1, 1]
+    assert results[2]["cached_ne"] == [8, 1, 1, 1]
+
+
+def test_compare_distinguishes_signed_zero_bits(tmp_path, monkeypatch):
+    positive = np.ones((1, 1, 2, 8), dtype="<f4")
+    negative = positive.copy()
+    positive[0, 0, 0, 0] = 0
+    negative[0, 0, 0, 0] = -0.0
+    unified, cached = tmp_path / "unified", tmp_path / "cached"
+    monkeypatch.setattr(traces, "load", lambda folder: {
+        ("unified" if folder == unified else "decode", "result_output"):
+            (dict(ne=[8, 2, 1, 1]), positive if folder == unified else negative)
+    })
+    result, = traces.compare(unified, cached, prompt=1)
+    assert result["bit_equal"] is False
+    assert result["max_abs_diff"] == 0
+
+
 def test_rejects_a_prefill_dimension_that_is_not_the_prompt():
     with pytest.raises(ValueError, match="prefill dimension 8 does not match prompt 9"):
         traces.align(np.ones((1, 1, 265, 8)), np.ones((1, 1, 8, 8)), "prefill", 9)
@@ -110,3 +160,17 @@ def test_q8_k_reference_scales_each_block_independently():
     rounded = projection.q8_k_reference(values)
     np.testing.assert_array_equal(rounded[0, :2], [127, 0])
     np.testing.assert_array_equal(rounded[0, 256:258], [63.5, 1])
+
+
+def test_reference_source_record_identifies_the_overlay_and_verified_pin():
+    evidence = json.loads((ROOT / "bench/checks/2026-11-05-dg-reference-paths.json").read_text())
+    source = json.loads((ROOT / "bench/checks" / evidence["reference_source_manifest"]).read_text())
+    pin = evidence["llama_cpp_commit"]
+    assert source["commit"] == pin
+    assert source["manifest"]["pin"] == pin
+    assert source["manifest"]["base"] == "a34de8618b25dfc32ee43749db47d767a9f0a25d"
+    assert source["manifest"]["files"]
+    verification = source["compilation_input_verification"]
+    assert verification["source_pin"] == pin
+    assert verification["compilation_inputs_checked"] == verification["matching"] == 403
+    assert verification["differences"] == []

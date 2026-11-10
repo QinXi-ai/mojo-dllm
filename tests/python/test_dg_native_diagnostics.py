@@ -38,6 +38,16 @@ def test_native_matmul_small_f32_roundtrip(matrix_case):
     np.testing.assert_array_equal(actual, np.concatenate([inputs, inputs * 2], axis=1))
 
 
+@pytest.mark.parametrize("type_id", [4, 5])
+def test_native_matmul_rejects_deprecated_type_without_dividing_by_zero(matrix_case, type_id):
+    command, _, _, output, _ = matrix_case
+    command[1] = str(type_id)
+    done = subprocess.run(command, capture_output=True, text=True, timeout=20)
+    assert done.returncode == 1, done.stderr
+    assert f"unsupported type id {type_id}" in done.stderr
+    assert not output.exists()
+
+
 @pytest.mark.parametrize("which", ["weight", "input"])
 @pytest.mark.parametrize("damage", ["short", "extra"])
 def test_native_matmul_rejects_inexact_tensor_file(matrix_case, which, damage):

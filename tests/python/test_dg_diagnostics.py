@@ -31,6 +31,7 @@ def load_module(name):
 projection = load_module("check_dg_projection")
 matmul = load_module("check_dg_matmul")
 softmax = load_module("check_dg_softmax")
+tiny_paths = load_module("check_dg_tiny_paths")
 
 
 def write_trace(folder, phases):
@@ -169,6 +170,99 @@ def test_softmax_reports_f64_error_and_replay_mismatch(tmp_path, monkeypatch):
     assert all(r["max_abs_from_f64"] < 1e-7 for r in results)
     assert results[0]["replay_bit_equal"] is False
     assert results[2]["replay_bit_equal"] is True
+
+
+def test_softmax_reports_one_ulp_shape_difference(tmp_path, monkeypatch):
+    prompt, total = 8, 24
+    scores = np.zeros((2, total, total), dtype="<f4")
+    short = causal_softmax(scores[:, :prompt, :prompt])
+    longer = short.copy()
+    longer.view(np.uint32)[0, 0, 0] += 1
+    full = np.zeros_like(scores)
+    full[:, :prompt, :prompt] = longer
+    write_trace(tmp_path / "unified", {"unified": {"kq-0": scores[None], "kq_soft_max-0": full[None]}})
+    write_trace(tmp_path / "cached", {"prefill": {"kq_soft_max-0": short[None]}})
+    monkeypatch.setattr(softmax, "Softmax", lambda folder: SimpleNamespace(
+        run=lambda values, keys: short.copy() if keys == prompt else longer.copy()))
+    output = tmp_path / "softmax.json"
+    monkeypatch.setattr(sys, "argv", ["check_dg_softmax.py", str(tmp_path / "unified"),
+        str(tmp_path / "cached"), "--prompt", "8", "--llama-bin", str(tmp_path), "--out", str(output)])
+    assert softmax.main() == 0
+    results = json.loads(output.read_text())["results"]
+    one_ulp = float(np.spacing(np.float32(1)))
+    assert [r["max_abs_from_short"] for r in results] == [0, one_ulp, one_ulp, one_ulp]
+    assert [r["max_abs_from_f64"] for r in results][1:] == [one_ulp] * 3
+    assert results[0]["replay_bit_equal"] is True
+    assert results[2]["replay_bit_equal"] is True
+
+
+def test_tiny_paths_executes_both_paths_and_reports_one_ulp_difference(tmp_path, monkeypatch):
+    tensor = SimpleNamespace(name="token_embd.weight", shape=[2, 8],
+                             data=np.ones((8, 2), dtype=np.float32), tensor_type=0)
+    install_gguf_double(monkeypatch, [tensor])
+    sys.modules["gguf"].GGUFReader = lambda path: SimpleNamespace(fields={}, tensors=[tensor])
+    sys.modules["gguf"].GGUFValueType = SimpleNamespace(ARRAY=9)
+    writes = []
+
+    class Writer:
+        def __init__(self, path, architecture):
+            assert architecture == "diffusion-gemma"
+            self.path = Path(path)
+
+        def add_tensor(self, name, values):
+            writes.append((name, values.copy()))
+
+        def close(self):
+            self.path.write_bytes(b"controlled f32 fixture")
+
+        def __getattr__(self, name):
+            assert name.startswith(("add_", "write_")), name
+            return lambda *args, **kwargs: None
+
+    sys.modules["gguf"].GGUFWriter = Writer
+    independent = tmp_path / "independent.py"
+    independent.write_text(
+        "import numpy as np\n"
+        "class Model:\n"
+        "    def __init__(self, path):\n"
+        "        assert path.read_bytes() == b'controlled f32 fixture'\n"
+        "def tiny_tokens(model, prompt, seed):\n"
+        "    assert seed == 7\n"
+        "    return np.arange(prompt + 4) % 8\n"
+        "def forward(model, tokens, prompt, quant):\n"
+        "    assert quant is False\n"
+        "    return np.tile(np.arange(1, 9, dtype=np.float32), (4, 1))\n"
+    )
+    commands = []
+
+    def run_reference(command, **kwargs):
+        commands.append(command)
+        values = np.tile(np.arange(1, 9, dtype="<f4"), (4, 1))
+        if "--cached" in command:
+            values.view(np.uint32)[0, 0] += 1
+        values.tofile(command[5])
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(tiny_paths.subprocess, "run", run_reference)
+    monkeypatch.setitem(sys.modules, "dg_numpy", ModuleType("dg_numpy"))
+    output = tmp_path / "tiny-paths"
+    monkeypatch.setattr(sys, "argv", ["check_dg_tiny_paths.py", "--ref", str(tmp_path / "dg_ref"),
+        "--numpy", str(independent), "--out-dir", str(output)])
+    assert tiny_paths.main() == 0
+    results = json.loads((output / "comparison.json").read_text())["results"]
+    assert len(commands) == 8
+    assert ["--cached" in command for command in commands] == [False, True] * 4
+    assert [(r["prompt_length"], r["path"], r["reference"]) for r in results] == [
+        (prompt, path, reference) for prompt in (8, 9, 14, 16)
+        for path, reference in (("unified", "independent_f32"), ("cached", "independent_f32"), ("cached", "unified"))
+    ]
+    for start in range(0, 12, 3):
+        assert results[start]["max_abs_diff"] == 0
+        assert results[start + 1]["max_abs_diff"] == float(np.spacing(np.float32(1)))
+        assert results[start + 1]["argmax_agree"] == 4
+        assert results[start + 2]["bit_equal"] is False
+    assert writes[0][0] == "token_embd.weight"
+    assert writes[0][1].dtype == np.float32
 
 
 def softmax_with_recorded_api(compute_status=0):

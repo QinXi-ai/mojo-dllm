@@ -42,7 +42,12 @@ int main(int argc, char ** argv) {
         return 1;
     }
     const auto type = static_cast<ggml_type>(type_id);
-    if (k % ggml_blck_size(type)) {
+    const int64_t block_size = ggml_blck_size(type);
+    if (block_size <= 0) {
+        std::fprintf(stderr, "dg_matmul: unsupported type id %d\n", type_id);
+        return 1;
+    }
+    if (k % block_size) {
         std::fprintf(stderr, "dg_matmul: K does not match the %s block size\n", ggml_type_name(type));
         return 1;
     }

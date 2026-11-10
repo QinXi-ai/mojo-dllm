@@ -11,7 +11,7 @@
     "threads": 8,
     "gpu": false
   },
-  "decision": "Use the cached reference for the cached implementation. Both paths implement the same forward equations.",
+  "decision": "Choose cached as the comparator for the prefill-once implementation in #64, departing from the default unified pass. Both paths implement the same forward equations and numerical comparisons retain their measured spread in both directions.",
   "p9_trace_run": {
     "prompt_tokens": [
       2,
@@ -3620,5 +3620,6 @@
       "mechanism": "SIMD-width vector exponential/block reduction versus scalar exponential/individual accumulation"
     }
   ],
-  "historical_compiler_flags": "The issue reports the old boundary pattern without compiler flags. The AVX2/FMA width-eight source branch corresponds to that pattern."
+  "historical_compiler_flags": "The issue reports the old boundary pattern without compiler flags. The AVX2/FMA width-eight source branch corresponds to that pattern.",
+  "reference_source_manifest": "2026-11-05-dg-reference-source.json"
 }
