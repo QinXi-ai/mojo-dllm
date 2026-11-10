@@ -314,9 +314,9 @@ against the unified pass, and the unified pass again with the previous-step
 logits changed by one part in a million. On the two LLaDA prompts with a random
 canvas those distances exceed the LLaDA bound (the one-in-a-million change moved
 the output by a median relative RMS of 0.18 to 0.26). No LLaDA spread was
-measured for comparison. The reference-path investigation below identifies
-shape-dependent matrix products and prompt softmax as the first sources of
-the cached/unified difference. A failed comparison prints these distances beside the verdict. No
+measured for comparison. The cause is untested: expert routing flips (8 of 128
+experts per token) carried to every row by bidirectional attention are a
+hypothesis. A failed comparison prints these distances beside the verdict. No
 DiffusionGemma result is recorded yet, so the tables above hold none.
 
 The tokenizer goldens in `tests/fixtures/gemma4-tokenizer-golden.tsv` fix the
