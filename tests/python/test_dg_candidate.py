@@ -89,6 +89,26 @@ def test_candidate_passes_canvas_positions_to_logits_argv(tmp_path: Path) -> Non
     candidate.export_candidate(case, model, "unified", command, candidate_revision="fixture")
 
 
+@pytest.mark.parametrize(("variant", "path"), [
+    ("unified", "unified"), ("cached", "cached"), ("unified-sc", "unified"), ("cached-sc", "cached"),
+])
+def test_candidate_passes_logits_path(tmp_path: Path, variant: str, path: str) -> None:
+    case, model, _ = fixture(tmp_path)
+    command = runtime_command(sc=variant.endswith("-sc"), code=f"assert sys.argv[4] == {path!r}")
+    command[command.index("{variant}")] = "{path}"
+    candidate.export_candidate(case, model, variant, command, candidate_revision="fixture")
+
+
+@pytest.mark.parametrize("variant", ["unified", "cached"])
+@pytest.mark.parametrize("placeholder", ["{prev}", "{prev_temp_inv}"])
+def test_candidate_refuses_previous_inputs_without_sc(tmp_path: Path, variant: str, placeholder: str) -> None:
+    case, model, _ = fixture(tmp_path)
+    command = runtime_command() + [placeholder]
+    with pytest.raises(SystemExit, match="self-conditioning"):
+        candidate.export_candidate(case, model, variant, command, candidate_revision="fixture")
+    assert not (case / f"{variant}.mojo.f32").exists()
+
+
 @pytest.mark.parametrize("changed", ["path", "size", "mtime"])
 def test_candidate_model_must_match_reference_source(tmp_path: Path, changed: str) -> None:
     case, model, meta = fixture(tmp_path)
