@@ -6,7 +6,7 @@ import difflib
 import sys
 
 from launcher.build import BINARY, ROOT, ensure_built, exec_binary
-from launcher.doctor import parse_doctor_args, run_doctor
+from launcher.doctor import parse_doctor_args, run_doctor, run_doctor_json
 from launcher.errors import LauncherError, UsageError, describe_os_error
 from launcher.probes import read_project_version, real_probes
 from launcher.runcmd import cmd_pull, cmd_run
@@ -44,6 +44,7 @@ def help_text(style: Style) -> str:
         b("Options"),
         "  setup [--model MODEL] [--yes] [--no-model] [--offline]",
         "  pull [MODEL] [--offline]",
+        "  doctor [--json]",
         '  run "PROMPT" [-m MODEL] [--device auto|cpu|gpu] [--offline] [binary flags]',
         "",
         '  A prompt that starts with - goes after --: ./mojo-dllm run -- "-5 plus 3?"',
@@ -102,7 +103,9 @@ def main(argv: list[str]) -> int:
         if command == "doctor":
             # Checked before real_probes(), which runs mojo and nvidia-smi: a
             # rejected command must not touch the machine.
-            parse_doctor_args(rest)
+            as_json = parse_doctor_args(rest)
+            if as_json:
+                return run_doctor_json(real_probes(), sys.stdout)
             return run_doctor(real_probes(), sys.stdout, Style.for_stream(sys.stdout))
         if command not in BINARY_COMMANDS:
             raise UsageError(_unknown_command(command))
