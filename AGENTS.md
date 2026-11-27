@@ -33,11 +33,12 @@ only.
 - `scripts/ci-local.sh --fast` runs the hygiene scan on staged files,
   `mojo format` and the `-Werror` build.
 - `scripts/run-tests.sh` compiles each `tests/test_*.mojo` and compares the
-  total of passing tests with `tests/test-count.txt`. After you add or remove
-  tests, run `UPDATE_TEST_COUNT=1 scripts/run-tests.sh` and commit the new
-  count.
+  total of passing tests with `tests/test-count.txt` and the count of each
+  file with `tests/test-counts.txt`. After you add or remove tests, run
+  `UPDATE_TEST_COUNT=1 scripts/run-tests.sh` and commit both files.
 - `scripts/run-gpu-tests.sh` runs `tests/gpu/` against
-  `tests/gpu/test-count.txt`. It needs an NVIDIA GPU with compute capability
+  `tests/gpu/test-count.txt` and `tests/gpu/test-counts.txt`, the same two
+  pins. It needs an NVIDIA GPU with compute capability
   8.0 or newer and exits 1 without one. Say that you did not run it, and do
   not report it as passed.
 - Launcher tests: `uv run --frozen --only-group test pytest tests/python -q`.

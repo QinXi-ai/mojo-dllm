@@ -48,6 +48,7 @@ def test_help_lists_every_command_and_the_environment() -> None:
         assert var in text, var
     assert "Quick start" in text and "Examples" in text
     assert "./mojo-dllm run" in text and "./mojo-dllm doctor" in text and "./mojo-dllm setup" in text
+    assert "  doctor [--json]" in text
     assert "inspect" in text and "tokenize" in text
     assert "--version" in text
 
@@ -161,6 +162,18 @@ def test_doctor_rejects_a_stray_word(
     assert cli.main(["doctor", "now"]) == 2
     out, err = capsys.readouterr()
     assert err.startswith("error:") and "unexpected argument 'now'" in err
+    assert "Usage: ./mojo-dllm doctor [--json]" in err
+    assert out == ""
+
+
+@pytest.mark.parametrize("arg", ["--jsonx", "--json=1", "--json-"])
+def test_doctor_json_is_matched_whole_not_by_prefix(
+    arg: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _forbid_probes(monkeypatch)
+    assert cli.main(["doctor", arg]) == 2
+    out, err = capsys.readouterr()
+    assert f"unknown option {arg} for doctor" in err
     assert out == ""
 
 

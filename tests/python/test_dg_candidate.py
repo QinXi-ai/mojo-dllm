@@ -100,7 +100,7 @@ def test_candidate_passes_logits_path(tmp_path: Path, variant: str, path: str) -
 
 
 @pytest.mark.parametrize("variant", ["unified", "cached"])
-@pytest.mark.parametrize("placeholder", ["{prev}", "{prev_temp_inv}"])
+@pytest.mark.parametrize("placeholder", ["{prev}", "{prev_temp_inv}", "{prev!s}", "{prev_temp_inv:>8}"])
 def test_candidate_refuses_previous_inputs_without_sc(tmp_path: Path, variant: str, placeholder: str) -> None:
     case, model, _ = fixture(tmp_path)
     command = runtime_command() + [placeholder]

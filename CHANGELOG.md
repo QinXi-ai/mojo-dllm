@@ -6,6 +6,22 @@ semantic versioning (0.y: minor bumps may break things).
 
 ## [Unreleased]
 
+### Added
+
+- `./mojo-dllm doctor --json` prints the doctor's checks as one line of JSON for scripts and agents, with a `schema`
+  number, an overall `ok` and one entry per check (`id`, `status`, `detail`, `fix`). The exit status is the text
+  report's, and a misspelled option such as `--jsno` or `--jsonx` is refused with exit 2 (issue #116, pull request #300).
+- `bench/dg_candidate.py` fills `{rows_csv}`, the zero-based canvas positions after the prompt, so `mojo-dllm logits` runs
+  as the candidate command for the `unified` and `cached` variants and the receipt names the binary that wrote the
+  logits (issue #276, pull request #301).
+- `bench/dg_candidate.py` fills `{path}`, the variant without `-sc`, so `mojo-dllm logits --path {path}` runs the two
+  self-conditioned variants too. A template must consume `{variant}` or `{path}`, and `{prev}` or `{prev_temp_inv}` in
+  the template of a plain variant is refused before the command runs, also with a conversion or format spec such as
+  `{prev!s}` (issue #302, pull request #303).
+- `AGENTS.md` lists what the file tree does not show to a coding agent: the gates and what a SKIP means, the tiny
+  fixtures that have no tokenizer, the benchmark tables that CI renders, and when not to open an issue or a pull
+  request. `CLAUDE.md` holds one line that imports it (issue #93, pull request #299).
+
 ## [0.3.0] - 2026-11-24
 
 ### Added
