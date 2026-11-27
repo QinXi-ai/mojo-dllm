@@ -20,10 +20,22 @@ import datetime as dt
 import json
 import pathlib
 import shutil
+import string
 import subprocess
 import time
 
 import parity
+
+
+def _template_fields(template: list[str]) -> set[str]:
+    """The names of the replacement fields in an argv template, so `{prev!s}` and `{prev:>8}`
+    count as `{prev}`: str.format fills all three."""
+    names = set()
+    for part in template:
+        for _, field, _, _ in string.Formatter().parse(part):
+            if field:
+                names.add(field.split(".")[0].split("[")[0])
+    return names
 
 
 def export_candidate(case_dir: pathlib.Path, model: pathlib.Path, variant: str, template: list[str],
@@ -43,7 +55,7 @@ def export_candidate(case_dir: pathlib.Path, model: pathlib.Path, variant: str, 
     required += ["{case_json}"] if "{case_json}" in joined else ["{prompt_csv}", "{canvas_csv}"]
     if variant.endswith("-sc"):
         required += ["{prev}", "{prev_temp_inv}"]
-    elif "{prev}" in joined or "{prev_temp_inv}" in joined:
+    elif _template_fields(template) & {"prev", "prev_temp_inv"}:
         raise SystemExit(f"refusing: {{prev}} and {{prev_temp_inv}} require self-conditioning (variant {variant})")
     if any(key not in joined for key in required):
         raise SystemExit(f"refusing: command must consume these input placeholders: {', '.join(required)}")

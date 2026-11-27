@@ -372,7 +372,8 @@ calibrated bounds. A reference outside those bounds stops the comparison.
 
 `bench/dg_candidate.py` executes the supplied candidate command without a shell
 and writes an execution receipt alongside each `*.mojo.f32`. Its argv template
-passes the model, variant, full case inputs, output path and, for SC, the shared
+passes the model, the variant (`{variant}`) or its path name (`{path}`, the
+variant without `-sc`), full case inputs, output path and, for SC, the shared
 original previous-step buffer and its temperature. Receipts bind those inputs
 to output contents and the executed binary/revision. The comparator verifies
 all receipts and expected output lengths before computing metrics. Each measured
