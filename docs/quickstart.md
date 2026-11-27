@@ -42,6 +42,13 @@ memory, the Mojo version, the binary's age, the GPU and the model cache. Every
 line that is not `ok` says how to fix it, with the command where one exists; for a
 missing GPU it says that the CPU will be used.
 
+`./mojo-dllm doctor --json` prints the same checks as one JSON object on
+stdout and exits with the same status. Each check has an `id` (`platform`,
+`glibc`, `cpu`, `memory`, `toolchain`, `binary`, `gpu`, `model`), a `status`
+(`ok`, `warn` or `fail`), a `detail` and a `fix` (`null` when there is nothing
+to do). The `id` values stay stable and new checks get new ids; `detail` and
+`fix` are text for people and can change.
+
 ## 2. Generate
 
 ```bash

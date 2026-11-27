@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import tomllib
@@ -174,6 +175,27 @@ def test_doctor_still_runs_without_arguments(
     # passing because doctor never ran.
     monkeypatch.setattr(cli, "real_probes", lambda: make_probes(glibc="2.31"))
     assert cli.main(["doctor"]) == 1
+
+
+def test_doctor_json_prints_one_json_document(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "real_probes", make_probes)
+    assert cli.main(["doctor", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    monkeypatch.setattr(cli, "real_probes", lambda: make_probes(glibc="2.31"))
+    assert cli.main(["doctor", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
+def test_doctor_json_still_rejects_other_arguments(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _forbid_probes(monkeypatch)
+    assert cli.main(["doctor", "--json", "--jsno"]) == 2
+    out, err = capsys.readouterr()
+    assert err.startswith("error:") and "Usage: ./mojo-dllm doctor [--json]" in err
+    assert out == ""
 
 
 def test_doctor_help_still_wins(

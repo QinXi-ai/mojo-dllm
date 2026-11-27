@@ -1,22 +1,84 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 
 import pytest
 
-from launcher.doctor import preflight, run_doctor
+from launcher.doctor import preflight, run_doctor, run_doctor_json
 from launcher.ui import Style
 
 from conftest import GPU_TEXT, MEMINFO, make_probes
 
 UV_FIX = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+LABELS = ["platform", "glibc", "cpu", "memory", "toolchain", "binary", "gpu", "model"]
 
 
 def doctor(**overrides: object) -> tuple[int, list[str]]:
     out = io.StringIO()
     code = run_doctor(make_probes(**overrides), out, Style(False))
     return code, out.getvalue().splitlines()
+
+
+def doctor_json(**overrides: object) -> tuple[int, str]:
+    out = io.StringIO()
+    code = run_doctor_json(make_probes(**overrides), out)
+    return code, out.getvalue()
+
+
+def _parse_json_report(text: str) -> dict:
+    assert text.startswith("{") and text.endswith("}\n")
+    assert len(text.splitlines()) == 1
+    assert "\x1b" not in text
+    document = json.loads(text)
+    assert len(document["checks"]) == 8
+    return document
+
+
+def _check(document: dict, check_id: str) -> dict:
+    return next(c for c in document["checks"] if c["id"] == check_id)
+
+
+def test_json_all_green() -> None:
+    code, text = doctor_json()
+    assert code == 0
+    document = _parse_json_report(text)
+    assert document["schema"] == 1
+    assert document["ok"] is True
+    assert [c["id"] for c in document["checks"]] == LABELS
+    assert all(c["status"] == "ok" for c in document["checks"])
+    assert document["checks"][0]["fix"] is None
+    assert all(set(c) == {"id", "status", "detail", "fix"} for c in document["checks"])
+
+
+def test_json_failed_check_sets_ok_false_and_exit_1() -> None:
+    code, text = doctor_json(glibc="2.31")
+    assert code == 1
+    document = _parse_json_report(text)
+    assert document["ok"] is False
+    glibc = _check(document, "glibc")
+    assert glibc["status"] == "fail"
+    assert "2.31" in glibc["detail"]
+    assert isinstance(glibc["fix"], str) and glibc["fix"]
+
+
+def test_json_warning_keeps_ok_true() -> None:
+    code, text = doctor_json(cached_model=None)
+    assert code == 0
+    document = _parse_json_report(text)
+    assert document["ok"] is True
+    model = _check(document, "model")
+    assert model["status"] == "warn"
+    assert model["fix"] == "./mojo-dllm pull"
+
+
+def test_json_escapes_non_ascii_paths() -> None:
+    code, text = doctor_json(cached_model=Path("/cache/mödel.gguf"))
+    assert code == 0
+    assert text.isascii()
+    document = _parse_json_report(text)
+    assert _check(document, "model")["detail"] == "/cache/mödel.gguf"
 
 
 def marks(lines: list[str]) -> list[str]:
