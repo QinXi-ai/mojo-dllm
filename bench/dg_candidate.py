@@ -5,9 +5,11 @@
       CANDIDATE --case {case_json} --variant {variant} --model {model} --out {out}
 
 The command is an argv template, executed without a shell. It must consume the
-case JSON (or both {prompt_csv} and {canvas_csv}), {variant}, {model}, and {out}.
+case JSON (or both {prompt_csv} and {canvas_csv}), {variant} or {path}, {model},
+and {out}. {variant} is the full variant name; {path} is unified or cached.
 The optional {rows_csv} lists the zero-based canvas positions after the prompt.
-Self-conditioned variants also require {prev} and {prev_temp_inv}. The runtime
+Self-conditioned variants require {prev} and {prev_temp_inv}; other variants
+refuse both placeholders. The runtime
 forward pass is supplied by the caller; this wrapper records its real execution.
 """
 
@@ -35,10 +37,14 @@ def export_candidate(case_dir: pathlib.Path, model: pathlib.Path, variant: str, 
     if variant not in parity.DG_VARIANTS:
         raise SystemExit(f"refusing: unknown DiffusionGemma variant {variant}")
     joined = " ".join(template)
-    required = ["{model}", "{out}", "{variant}"]
+    required = ["{model}", "{out}"]
+    if "{variant}" not in joined and "{path}" not in joined:
+        raise SystemExit("refusing: command must consume one of the input placeholders: {variant} or {path}")
     required += ["{case_json}"] if "{case_json}" in joined else ["{prompt_csv}", "{canvas_csv}"]
     if variant.endswith("-sc"):
         required += ["{prev}", "{prev_temp_inv}"]
+    elif "{prev}" in joined or "{prev_temp_inv}" in joined:
+        raise SystemExit(f"refusing: {{prev}} and {{prev_temp_inv}} require self-conditioning (variant {variant})")
     if any(key not in joined for key in required):
         raise SystemExit(f"refusing: command must consume these input placeholders: {', '.join(required)}")
     output = case_dir / f"{variant}.mojo.f32"
@@ -47,7 +53,8 @@ def export_candidate(case_dir: pathlib.Path, model: pathlib.Path, variant: str, 
         raise SystemExit(f"refusing: {output} or its receipt already exists")
     inputs = parity.dg_receipt_inputs(case_dir, meta, variant)
     first_row = len(meta["prompt_tokens"])
-    values = dict(model=str(model), out=str(output), variant=variant, case_json=str(case_dir / "case.json"),
+    values = dict(model=str(model), out=str(output), variant=variant, path=variant.removesuffix("-sc"),
+                  case_json=str(case_dir / "case.json"),
                   prompt_csv=",".join(map(str, meta["prompt_tokens"])),
                   canvas_csv=",".join(map(str, meta["canvas_tokens"])),
                   rows_csv=",".join(map(str, range(first_row, first_row + meta["canvas_length"]))),
