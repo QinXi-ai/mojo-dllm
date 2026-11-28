@@ -1041,6 +1041,16 @@ def test_inspect_pins_the_diffusion_gemma_fixture_output() raises:
             "  final logit softcap: 30.0",
             "  canvas length: 16",
             "  context length: 8192",
+            "  defaults (key absent from the file):",
+            "    diffusion.eb_max_steps = 48 (default, key absent)",
+            "    diffusion.eb_t_min = 0.4 (default, key absent)",
+            "    diffusion.eb_t_max = 0.8 (default, key absent)",
+            "    diffusion.eb_entropy_bound = 0.1 (default, key absent)",
+            "    diffusion.eb_stability_threshold = 1 (default, key absent)",
+            (
+                "    diffusion.eb_confidence_threshold = 0.005 (default, key"
+                " absent)"
+            ),
             "",
             "metadata:",
             '  general.architecture = "diffusion-gemma"',
@@ -1177,8 +1187,8 @@ def test_inspect_lists_the_defaults_of_a_diffusion_gemma_file() raises:
         " absent)\n"
         in text
     )
-    var full = inspect_text("tests/fixtures/tiny-diffusion-gemma.gguf")
-    assert_true("default" not in full)
+    var full = inspect_text("tests/fixtures/diffusion-gemma/eb-defaults.gguf")
+    assert_true("(default, key absent)" not in full)
 
 
 def test_inspect_says_why_a_llada_config_is_refused() raises:
@@ -2245,6 +2255,96 @@ def test_the_logits_command_refuses_the_gpu_for_diffusion_gemma() raises:
 def _run_args(argv: List[String]) raises -> Args:
     var spec = command_spec("run")
     return Args(argv, spec.values, spec.booleans)
+
+
+def test_diffusion_gemma_eb_wrong_types_name_each_key() raises:
+    for suffix in [
+        "max_steps",
+        "t_min",
+        "t_max",
+        "entropy_bound",
+        "stability_threshold",
+        "confidence_threshold",
+    ]:
+        var key = "diffusion.eb_" + suffix
+        var path = "tests/fixtures/diffusion-gemma/wrong-type-" + key + ".gguf"
+        with assert_raises(contains=key):
+            _ = ModelConfig(GGUFFile(path))
+
+
+def test_diffusion_gemma_invalid_eb_values_name_the_key() raises:
+    for suffix in [
+        "max_steps",
+        "t_max",
+        "entropy_bound",
+        "confidence_threshold",
+    ]:
+        var key = "diffusion.eb_" + suffix
+        var path = "tests/fixtures/diffusion-gemma/invalid-" + key + ".gguf"
+        with assert_raises(contains=key):
+            _ = ModelConfig(GGUFFile(path))
+
+
+def test_gen_config_reads_diffusion_gemma_eb_defaults() raises:
+    var model = ModelConfig(
+        GGUFFile("tests/fixtures/diffusion-gemma/eb-defaults.gguf")
+    )
+    var c = gen_config(_arch_run_args([]), model.eb)
+    assert_equal(c.eb_steps, 17, "diffusion.eb_max_steps")
+    assert_equal(c.eb_t_min, 0.25, "diffusion.eb_t_min")
+    assert_equal(c.eb_t_max, 0.75, "diffusion.eb_t_max")
+    assert_equal(c.eb_bound, 0.125, "diffusion.eb_entropy_bound")
+    assert_equal(c.eb_stability, 3, "diffusion.eb_stability_threshold")
+    assert_equal(c.eb_confidence, 0.03125, "diffusion.eb_confidence_threshold")
+
+
+def test_gen_config_eb_flags_override_only_their_file_values() raises:
+    var model = ModelConfig(
+        GGUFFile("tests/fixtures/diffusion-gemma/eb-defaults.gguf")
+    )
+    var a = _arch_run_args(["--eb-steps", "48", "--eb-bound", "0"])
+    var c = gen_config(a, model.eb)
+    assert_equal(c.eb_steps, 48)
+    assert_equal(c.eb_bound, 0.0)
+    assert_equal(c.eb_confidence, 0.03125)
+    var rest = gen_config(
+        _arch_run_args(
+            [
+                "--eb-t-min",
+                "0",
+                "--eb-t-max",
+                "1",
+                "--eb-stability",
+                "0",
+                "--eb-confidence",
+                "0.005",
+            ]
+        ),
+        model.eb,
+    )
+    assert_equal(rest.eb_t_min, 0.0)
+    assert_equal(rest.eb_t_max, 1.0)
+    assert_equal(rest.eb_stability, 0)
+    assert_equal(rest.eb_confidence, 0.005)
+    assert_equal(rest.eb_steps, 17)
+
+
+def test_gen_config_eb_missing_keys_use_reference_defaults() raises:
+    var model = ModelConfig(GGUFFile(DG_TINY))
+    var c = gen_config(_arch_run_args([]), model.eb)
+    assert_equal(c.eb_steps, 48)
+    assert_equal(c.eb_t_min, 0.4)
+    assert_equal(c.eb_t_max, 0.8)
+    assert_equal(c.eb_bound, 0.1)
+    assert_equal(c.eb_stability, 1)
+    assert_equal(c.eb_confidence, 0.005)
+    var partial = ModelConfig(
+        GGUFFile("tests/fixtures/diffusion-gemma/eb-bound-only.gguf")
+    )
+    var p = gen_config(_arch_run_args([]), partial.eb)
+    assert_equal(p.eb_bound, 0.0)
+    assert_equal(p.eb_steps, 48)
+    assert_equal(p.eb_t_max, 0.8)
 
 
 def test_gen_config_maps_every_run_flag_to_its_field() raises:

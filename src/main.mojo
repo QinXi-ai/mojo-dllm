@@ -46,6 +46,7 @@ from mojo_dllm.models.diffusion_gemma import DiffusionGemma
 from mojo_dllm.models.transformer import (
     DenoisingModel,
     DiffusionLM,
+    EntropyBoundDefaults,
     ModelConfig,
     Timings,
     GEMMA_ARCH,
@@ -818,12 +819,14 @@ def check_context_length(
         )
 
 
-def gen_config(a: Args) raises -> GenConfig:
+def gen_config(
+    a: Args, eb: EntropyBoundDefaults = EntropyBoundDefaults()
+) raises -> GenConfig:
     """The sampler settings the `run` flags ask for: each flag to its field,
     with the defaults that depend on another flag (`--steps` is `--max-tokens`,
     `--block-length` is `--max-tokens` capped at 32). The stop and canvas
     settings that need the tokenizer are added by `_run`."""
-    var cfg = GenConfig()
+    var cfg = GenConfig(eb)
     cfg.gen_length = a.int_or("max-tokens", 128)
     cfg.steps = a.int_or("steps", cfg.gen_length)
     cfg.block_length = a.int_or("block-length", min(32, cfg.gen_length))
@@ -863,8 +866,6 @@ def cmd_run(a: Args) raises:
         raise Error("--visual-interval needs --visual")
     var device = a.get_or("device", "cpu")
     check_device(device)
-    var cfg = gen_config(a)
-    var threads = cfg.threads
     var t0 = perf_counter_ns()
     var g = GGUFFile(a.get("model"))
     check_arch_flags(a, g.architecture())
@@ -875,8 +876,11 @@ def cmd_run(a: Args) raises:
     var tok = Tokenizer(g)
     check_tokenizer_matches_model(g, tok)
     var prompt = encode_prompt(tok, g.architecture(), a)
+    var model = ModelConfig(g)
+    var cfg = gen_config(a, model.eb)
+    var threads = cfg.threads
     check_context_length(
-        len(prompt), cfg.gen_length, ModelConfig(g).ctx, g.architecture()
+        len(prompt), cfg.gen_length, model.ctx, g.architecture()
     )
     _ = g^
     var tok_s = Float64(perf_counter_ns() - t0) / 1e9

@@ -3,6 +3,8 @@ dequant-types.gguf
 diffusion-gemma/all-global.gguf
 diffusion-gemma/all-sliding.gguf
 diffusion-gemma/causal.gguf
+diffusion-gemma/eb-bound-only.gguf
+diffusion-gemma/eb-defaults.gguf
 diffusion-gemma/embd-width.gguf
 diffusion-gemma/expert-used-over.gguf
 diffusion-gemma/expert-used-zero.gguf
@@ -12,6 +14,10 @@ diffusion-gemma/exps-gate-up-dims.gguf
 diffusion-gemma/exps-gate-up.gguf
 diffusion-gemma/exps-missing.gguf
 diffusion-gemma/global-with-attn-v.gguf
+diffusion-gemma/invalid-diffusion.eb_confidence_threshold.gguf
+diffusion-gemma/invalid-diffusion.eb_entropy_bound.gguf
+diffusion-gemma/invalid-diffusion.eb_max_steps.gguf
+diffusion-gemma/invalid-diffusion.eb_t_max.gguf
 diffusion-gemma/k-dims.gguf
 diffusion-gemma/k-hidden.gguf
 diffusion-gemma/k-missing.gguf
@@ -89,6 +95,12 @@ diffusion-gemma/value-length.gguf
 diffusion-gemma/vocab-500-no-self-cond.gguf
 diffusion-gemma/vocab-500-self-cond.gguf
 diffusion-gemma/vocab-504-self-cond.gguf
+diffusion-gemma/wrong-type-diffusion.eb_confidence_threshold.gguf
+diffusion-gemma/wrong-type-diffusion.eb_entropy_bound.gguf
+diffusion-gemma/wrong-type-diffusion.eb_max_steps.gguf
+diffusion-gemma/wrong-type-diffusion.eb_stability_threshold.gguf
+diffusion-gemma/wrong-type-diffusion.eb_t_max.gguf
+diffusion-gemma/wrong-type-diffusion.eb_t_min.gguf
 diffusion-gemma/zero-diffusion-gemma.attention.head_count.gguf
 diffusion-gemma/zero-diffusion-gemma.attention.key_length.gguf
 diffusion-gemma/zero-diffusion-gemma.attention.key_length_swa.gguf

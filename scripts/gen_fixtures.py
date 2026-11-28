@@ -887,6 +887,26 @@ def diffusion_gemma() -> None:
     out = OUT / "diffusion-gemma"
     out.mkdir(parents=True, exist_ok=True)
     k = lambda name: GEMMA_KEY + name  # noqa: E731
+    eb = {
+        "diffusion.eb_max_steps": ("u32", 17),
+        "diffusion.eb_t_min": ("f32", 0.25),
+        "diffusion.eb_t_max": ("f32", 0.75),
+        "diffusion.eb_entropy_bound": ("f32", 0.125),
+        "diffusion.eb_stability_threshold": ("u32", 3),
+        "diffusion.eb_confidence_threshold": ("f32", 0.03125),
+    }
+    write_gemma(out / "eb-defaults.gguf", keys=eb)
+    write_gemma(out / "eb-bound-only.gguf", keys={"diffusion.eb_entropy_bound": ("f32", 0)})
+    for key, (kind, _) in eb.items():
+        wrong_type = ("bool", True) if kind == "u32" else ("u32", 2)
+        write_gemma(out / f"wrong-type-{key}.gguf", keys={key: wrong_type}, tensors="none")
+    for key, kind, value in [
+        ("diffusion.eb_max_steps", "u32", 0),
+        ("diffusion.eb_t_max", "f32", 0.0),
+        ("diffusion.eb_entropy_bound", "f32", -1.0),
+        ("diffusion.eb_confidence_threshold", "f32", float("nan")),
+    ]:
+        write_gemma(out / f"invalid-{key}.gguf", keys={key: (kind, value)}, tensors="none")
     pattern, kv = k("attention.sliding_window_pattern"), k("attention.head_count_kv")
 
     # Metadata only: the reader refuses before it looks at a tensor.

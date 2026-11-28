@@ -93,6 +93,19 @@ it does not shift the random stream. On GPU, suppression uses full logits
 because the device row statistics include the mask. `--no-suppress-mask`
 retains the existing device reduction path when its other conditions hold.
 
+For DiffusionGemma, each explicit `--eb-*` flag overrides its GGUF value. When
+the file omits a key, the sampler uses the fallback in the flag table above.
+`inspect` lists the keys that took a fallback.
+
+| GGUF key | Type | Flag |
+| --- | --- | --- |
+| `diffusion.eb_max_steps` | UINT32 | `--eb-steps` |
+| `diffusion.eb_t_min` | FLOAT32 | `--eb-t-min` |
+| `diffusion.eb_t_max` | FLOAT32 | `--eb-t-max` |
+| `diffusion.eb_entropy_bound` | FLOAT32 | `--eb-bound` |
+| `diffusion.eb_stability_threshold` | UINT32 | `--eb-stability` |
+| `diffusion.eb_confidence_threshold` | FLOAT32 | `--eb-confidence` |
+
 The `--eb-*` flags belong to DiffusionGemma and every other model refuses them by name. The parser accepts them, but `run` stops on a `diffusion-gemma` file until the model is wired into the generation loop (see [Introduction](introduction.md)). It refuses the file once its header is read, before the tokenizer is built, with ``diffusion-gemma does not run on this model: `run` waits for the model to be wired into the generation loop (#277), so use `logits` (CPU) until then``, so the `--eb-*` flags have no effect yet; `run --help` says so. Only `logits` runs that architecture. The forward pass (#64) and the entropy-bounded loop (#65) are written; #277 tracks joining them. Once it lands, DiffusionGemma's `--json` reports `"stopped_early": true` when the stop rule ends the run before `--eb-steps` steps.
 
 ### Visual output

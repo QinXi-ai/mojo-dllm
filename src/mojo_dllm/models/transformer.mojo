@@ -34,7 +34,12 @@ CPU forward pass for that architecture is `DiffusionGemma` in
 from std.math import isfinite
 from std.time import perf_counter_ns
 
-from mojo_dllm.formats.gguf import GGUFFile, TensorInfo
+from mojo_dllm.formats.gguf import (
+    GGUFFile,
+    TensorInfo,
+    GGUF_TYPE_UINT32,
+    GGUF_TYPE_FLOAT32,
+)
 from mojo_dllm.kernels.packed import PackedMatrix, pgemm
 from mojo_dllm.kernels.qgemm import QActs, quantize_acts
 from mojo_dllm.kernels.softembed import W as SOFTEMBED_W
@@ -120,6 +125,25 @@ comptime DEFAULT_ROPE_BASE: Float32 = 10000.0
 comptime DEFAULT_SOFTCAP: Float32 = 30.0
 
 
+struct EntropyBoundDefaults(Copyable, ImplicitlyCopyable, Movable):
+    """DiffusionGemma denoiser settings, with the reference CLI's fallbacks."""
+
+    var steps: Int
+    var t_min: Float64
+    var t_max: Float64
+    var bound: Float64
+    var stability: Int
+    var confidence: Float64
+
+    def __init__(out self):
+        self.steps = 48
+        self.t_min = 0.4
+        self.t_max = 0.8
+        self.bound = 0.1
+        self.stability = 1
+        self.confidence = 0.005
+
+
 @fieldwise_init
 struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
     """The hyperparameters of a GGUF model.
@@ -130,7 +154,7 @@ struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
     sliding layers'. Read them per layer through `kv_heads`, `head_size` and
     `rope_base`: a sliding layer that takes the global head size computes
     garbage without an error. `head_dim` is not `hidden / n_heads` there.
-    The fields below `shift_logits` are 0 or empty for the other architectures.
+    The other architectures do not use the DiffusionGemma fields.
     """
 
     var arch: String
@@ -160,6 +184,7 @@ struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
     """`final_logit_softcapping`: logits become softcap * tanh(logit / softcap); 0 is off. A missing key means 30, llama.cpp's default."""
     var canvas: Int
     """`diffusion.canvas_length`: the tokens the model denoises after the prompt."""
+    var eb: EntropyBoundDefaults
     var defaults: String
     """One line for each metadata key the file lacks and the reader replaced by a
     default, as `KEY = VALUE (default, key absent)`, each ending in a newline;
@@ -189,6 +214,7 @@ struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
         self.expert_ffn = 0
         self.softcap = 0.0
         self.canvas = 0
+        self.eb = EntropyBoundDefaults()
         var defaults = String("")
         var a = self.arch + "."
         self.n_layers = _positive(g, a + "block_count")
@@ -425,6 +451,48 @@ def _check_embedding_and_output_shapes(
         _expect_shape(g, "output.weight", [hidden, vocab], why)
 
 
+def _eb_uint(
+    g: GGUFFile, key: String, fallback: Int, minimum: Int, mut defaults: String
+) raises -> Int:
+    if not g.has_key(key):
+        defaults += _default_line(key, String(fallback))
+        return fallback
+    if g.value_type(key) != GGUF_TYPE_UINT32:
+        raise Error(key + " must be UINT32")
+    var value = g.get_int(key)
+    if value < minimum:
+        raise Error(
+            key
+            + " must be at least "
+            + String(minimum)
+            + ", got "
+            + String(value)
+        )
+    return value
+
+
+def _eb_float(
+    g: GGUFFile,
+    key: String,
+    fallback: Float64,
+    mut defaults: String,
+    *,
+    positive: Bool = False,
+) raises -> Float64:
+    if not g.has_key(key):
+        defaults += _default_line(key, String(fallback))
+        return fallback
+    if g.value_type(key) != GGUF_TYPE_FLOAT32:
+        raise Error(key + " must be FLOAT32")
+    var value = g.get_f32(key)
+    if not isfinite(value) or value < 0 or (positive and value == 0):
+        var rule = "above zero" if positive else "nonnegative"
+        raise Error(
+            key + " must be finite and " + rule + ", got " + String(value)
+        )
+    return Float64(value)
+
+
 def _read_diffusion_gemma(g: GGUFFile) raises -> ModelConfig:
     """The `diffusion-gemma` branch of `ModelConfig`.
 
@@ -578,6 +646,19 @@ def _read_diffusion_gemma(g: GGUFFile) raises -> ModelConfig:
     var theta = g.get_f32(a + GEMMA_ROPE_BASE)
     var theta_swa = g.get_f32(a + GEMMA_ROPE_BASE_SWA)
     var mask_id = g.get_int("tokenizer.ggml.mask_token_id")
+    var eb = EntropyBoundDefaults()
+    eb.steps = _eb_uint(g, "diffusion.eb_max_steps", eb.steps, 1, defaults)
+    eb.t_min = _eb_float(g, "diffusion.eb_t_min", eb.t_min, defaults)
+    eb.t_max = _eb_float(
+        g, "diffusion.eb_t_max", eb.t_max, defaults, positive=True
+    )
+    eb.bound = _eb_float(g, "diffusion.eb_entropy_bound", eb.bound, defaults)
+    eb.stability = _eb_uint(
+        g, "diffusion.eb_stability_threshold", eb.stability, 0, defaults
+    )
+    eb.confidence = _eb_float(
+        g, "diffusion.eb_confidence_threshold", eb.confidence, defaults
+    )
     # Every key is read before the first tensor, so a missing key is named
     # first even in a file without tensors.
     var vocab = g.tensor(GEMMA_TOKEN_EMBD).n_rows()
@@ -620,6 +701,7 @@ def _read_diffusion_gemma(g: GGUFFile) raises -> ModelConfig:
         expert_ffn=expert_ffn,
         softcap=softcap,
         canvas=canvas,
+        eb=eb,
         defaults=defaults,
     )
     _check_diffusion_gemma_tensors(g, c)

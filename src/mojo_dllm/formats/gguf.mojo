@@ -593,6 +593,10 @@ struct GGUFFile(Movable):
                 return self.kvs[i]
         raise Error("required metadata key missing: " + key)
 
+    def value_type(self, key: String) raises -> Int:
+        """The scalar or array type declared for this metadata key."""
+        return self._kv(key).kind
+
     def _read_scalar_int(self, kind: Int, at: Int) raises -> Int:
         var r = Reader(self.map.addr, self.map.size, at)
         if kind == GGUF_TYPE_UINT8 or kind == GGUF_TYPE_BOOL:

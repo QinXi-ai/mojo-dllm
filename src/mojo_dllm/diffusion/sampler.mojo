@@ -34,7 +34,11 @@ the reference.
 from std.math import exp, isfinite, log, nan
 from std.time import perf_counter_ns
 
-from mojo_dllm.models.transformer import DenoisingModel, RowStats
+from mojo_dllm.models.transformer import (
+    DenoisingModel,
+    EntropyBoundDefaults,
+    RowStats,
+)
 from mojo_dllm.sys.mem import Bytes, F32Ptr, Floats
 from mojo_dllm.sys.parallel import parallel_for
 
@@ -85,7 +89,7 @@ struct GenConfig(Copyable, Movable):
     var eb_confidence: Float64
     """DiffusionGemma: stop once the mean entropy is below this (0.005)."""
 
-    def __init__(out self):
+    def __init__(out self, eb: EntropyBoundDefaults = EntropyBoundDefaults()):
         self.gen_length = 128
         self.block_length = 32
         self.steps = 128
@@ -100,12 +104,12 @@ struct GenConfig(Copyable, Movable):
         self.stop_ids = List[Int]()
         self.threshold = 0.0
         self.dual_cache = False
-        self.eb_steps = 48
-        self.eb_t_min = 0.4
-        self.eb_t_max = 0.8
-        self.eb_bound = 0.1
-        self.eb_stability = 1
-        self.eb_confidence = 0.005
+        self.eb_steps = eb.steps
+        self.eb_t_min = eb.t_min
+        self.eb_t_max = eb.t_max
+        self.eb_bound = eb.bound
+        self.eb_stability = eb.stability
+        self.eb_confidence = eb.confidence
 
 
 def int_flag_rule(flag: String, n: Int) -> String:
